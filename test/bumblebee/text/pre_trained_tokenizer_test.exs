@@ -784,6 +784,34 @@ defmodule Bumblebee.Text.PreTrainedTokenizerTest do
                    end
     end
 
+    test "leaves out message keys set to nil" do
+      assert {:ok, tokenizer} = Bumblebee.load_tokenizer({:hf, "unsloth/gemma-7b-it"})
+
+      messages = [
+        %{"role" => "user", "content" => "Hi"},
+        %{"role" => "assistant", "content" => nil}
+      ]
+
+      assert Bumblebee.apply_chat_template(tokenizer, messages) ==
+               "<bos><start_of_turn>user\nHi<end_of_turn>\n<start_of_turn>model\n<end_of_turn>\n"
+    end
+
+    test "gives the reasoning under each of its names" do
+      assert {:ok, tokenizer} = Bumblebee.load_tokenizer({:hf, "Qwen/Qwen3-0.6B"})
+
+      messages = [
+        %{"role" => "user", "content" => "Is 91 prime?"},
+        %{"role" => "assistant", "content" => "No.", "thinking" => "91 = 7 * 13."},
+        %{"role" => "user", "content" => "And 97?"},
+        %{"role" => "assistant", "content" => "Yes.", "thinking" => "No divisors."}
+      ]
+
+      assert Bumblebee.apply_chat_template(tokenizer, messages) ==
+               "<|im_start|>user\nIs 91 prime?<|im_end|>\n<|im_start|>assistant\nNo.<|im_end|>\n" <>
+                 "<|im_start|>user\nAnd 97?<|im_end|>\n" <>
+                 "<|im_start|>assistant\n<think>\nNo divisors.\n</think>\n\nYes.<|im_end|>\n"
+    end
+
     test "raises when the repository has no chat template" do
       assert {:ok, tokenizer} = Bumblebee.load_tokenizer({:hf, "openai-community/gpt2"})
 

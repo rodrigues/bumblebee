@@ -64,7 +64,7 @@ defmodule Bumblebee do
 
   alias Bumblebee.HuggingFace
 
-  @compile {:no_warn_undefined, Otera.ChatTemplate}
+  @compile {:no_warn_undefined, [Otera.ChatTemplate, Otera.Dict]}
 
   @config_filename "config.json"
   @featurizer_filename "preprocessor_config.json"
@@ -1037,11 +1037,50 @@ defmodule Bumblebee do
         variables: variables
       ] ++ Keyword.take(opts, [:tools, :documents])
 
+    messages = Enum.map(messages, &normalize_chat_message/1)
+
     case Otera.ChatTemplate.render(template, messages, render_opts) do
       {:ok, prompt} -> prompt
       {:error, exception} -> raise exception
     end
   end
+
+  @reasoning_fields ["reasoning_content", "thinking", "reasoning"]
+
+  # As in transformers, keys set to nil are left out, and the reasoning
+  # is given under each of its names, since templates read different ones
+  defp normalize_chat_message(message) when is_map(message) do
+    pairs =
+      case message do
+        %Otera.Dict{} -> Enum.to_list(message)
+        %{} -> Enum.sort(for {key, value} <- message, do: {to_string(key), value})
+      end
+
+    pairs = for {key, value} <- pairs, value != nil, do: {key, value}
+
+    reasoning =
+      Enum.find_value(@reasoning_fields, fn field ->
+        with {_, value} <- List.keyfind(pairs, field, 0), do: value
+      end)
+
+    pairs =
+      if reasoning do
+        {_, thinking} = List.keyfind(pairs, "thinking", 0, {"thinking", reasoning})
+        pairs = [{"thinking", thinking} | List.keydelete(pairs, "thinking", 0)]
+
+        if List.keymember?(pairs, "reasoning_content", 0) do
+          List.keyreplace(pairs, "reasoning_content", 0, {"reasoning_content", reasoning})
+        else
+          pairs ++ [{"reasoning_content", reasoning}]
+        end
+      else
+        pairs
+      end
+
+    Otera.Dict.new(pairs)
+  end
+
+  defp normalize_chat_message(message), do: message
 
   defp select_chat_template(nil, _name, _tools) do
     raise ArgumentError,
