@@ -103,6 +103,8 @@ Here is a list of files commonly found in a repository following the Transformer
 
 - `tokenizer.json`, `tokenizer_config.json` - tokenizer configuration, describes how to convert text input to model inputs (tensors). See [Tokenizer support](#tokenizer-support)
 
+- `chat_template.jinja` - chat template, describes how to format a conversation into a prompt for chat models. The template may also be stored in `tokenizer_config.json`. See `Bumblebee.apply_chat_template/3`
+
 - `preprocessor_config.json` - featurizer configuration, describes how to convert real-world input (image, audio) to model inputs (tensors)
 
 - `generation_config.json` - a set of configuration options specific to text generation, such as token sampling strategy and various constraints
