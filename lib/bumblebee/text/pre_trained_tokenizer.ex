@@ -77,6 +77,8 @@ defmodule Bumblebee.Text.PreTrainedTokenizer do
   defstruct [
               :native_tokenizer,
               :type,
+              :chat_template,
+              chat_template_tokens: %{},
               special_tokens: %{},
               additional_special_tokens: []
             ] ++ Shared.option_defaults(options)
@@ -552,10 +554,13 @@ defmodule Bumblebee.Text.PreTrainedTokenizer do
   def tokenizer_types(), do: @tokenizer_types
 
   defimpl Bumblebee.HuggingFace.Transformers.Config do
-    def load(tokenizer, %{
-          "tokenizer_file" => path,
-          "special_tokens_map" => special_tokens_map
-        }) do
+    def load(
+          tokenizer,
+          %{
+            "tokenizer_file" => path,
+            "special_tokens_map" => special_tokens_map
+          } = data
+        ) do
       native_tokenizer =
         case Tokenizer.from_file(path) do
           {:ok, tokenizer} ->
@@ -596,9 +601,32 @@ defmodule Bumblebee.Text.PreTrainedTokenizer do
         tokenizer
         | native_tokenizer: native_tokenizer,
           special_tokens: special_tokens,
-          additional_special_tokens: additional_special_tokens
+          additional_special_tokens: additional_special_tokens,
+          chat_template: load_chat_template(data["chat_template"]),
+          chat_template_tokens: load_chat_template_tokens(special_tokens_map)
       }
       |> @for.config(template_options: template_options)
+    end
+
+    # Templates read the special tokens as configured, including ones
+    # that the tokenizer type does not track, such as the llama BOS token
+    defp load_chat_template_tokens(data) do
+      for {"" <> key, value} <- data,
+          String.ends_with?(key, "_token"),
+          token = chat_template_token(value),
+          into: %{},
+          do: {key, token}
+    end
+
+    defp chat_template_token(token) when is_binary(token), do: token
+    defp chat_template_token(%{"content" => token}) when is_binary(token), do: token
+    defp chat_template_token(_value), do: nil
+
+    defp load_chat_template(nil), do: nil
+    defp load_chat_template(template) when is_binary(template), do: template
+
+    defp load_chat_template(templates) when is_list(templates) do
+      for %{"name" => name, "template" => template} <- templates, into: %{}, do: {name, template}
     end
 
     defp load_special_tokens(special_tokens, data) do

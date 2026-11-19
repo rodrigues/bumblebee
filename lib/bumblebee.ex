@@ -64,11 +64,14 @@ defmodule Bumblebee do
 
   alias Bumblebee.HuggingFace
 
+  @compile {:no_warn_undefined, Otera.ChatTemplate}
+
   @config_filename "config.json"
   @featurizer_filename "preprocessor_config.json"
   @tokenizer_filename "tokenizer.json"
   @tokenizer_config_filename "tokenizer_config.json"
   @tokenizer_special_tokens_filename "special_tokens_map.json"
+  @chat_template_filename "chat_template.jinja"
   @generation_filename "generation_config.json"
   @scheduler_filename "scheduler_config.json"
 
@@ -951,6 +954,126 @@ defmodule Bumblebee do
   end
 
   @doc """
+  Renders a conversation into a prompt with the tokenizer's chat template.
+
+  The chat template comes from the model repository, either from
+  `chat_template.jinja` or from `tokenizer_config.json`, and is
+  rendered the same way as `apply_chat_template` in Python
+  transformers. Rendering requires the optional `:otera` dependency.
+
+  Messages are maps with `"role"` and `"content"`, plus any other
+  keys the template reads, such as `"tool_calls"`. To keep the key
+  order of messages and tools that come from JSON, decode them with
+  `Otera.JSON.decode!/1`.
+
+  ## Options
+
+    * `:add_generation_prompt` - whether to end the prompt with the
+      tokens that start an assistant message. Defaults to `false`
+
+    * `:continue_final_message` - whether to end the prompt inside
+      the final message, so that generation continues it. Defaults
+      to `false`
+
+    * `:tools` - a list of tool definitions to pass to the template
+
+    * `:documents` - a list of documents to pass to the template
+
+    * `:chat_template` - the name of the template to use, when the
+      repository defines several. Defaults to `"tool_use"` when
+      `:tools` are given and such template exists, otherwise to
+      `"default"`
+
+    * `:variables` - a map of other variables for the template, such
+      as `%{"enable_thinking" => false}`
+
+  The prompt already includes the special tokens the model expects,
+  such as the BOS token, so tokenize it with `add_special_tokens: false`,
+  otherwise those tokens are added twice.
+
+  ## Examples
+
+      {:ok, tokenizer} = Bumblebee.load_tokenizer({:hf, "Qwen/Qwen3-0.6B"})
+
+      messages = [%{"role" => "user", "content" => "What is the capital of Brazil?"}]
+      prompt = Bumblebee.apply_chat_template(tokenizer, messages, add_generation_prompt: true)
+      #=> "<|im_start|>user\\nWhat is the capital of Brazil?<|im_end|>\\n<|im_start|>assistant\\n"
+
+      tokenizer = Bumblebee.configure(tokenizer, add_special_tokens: false)
+      Bumblebee.apply_tokenizer(tokenizer, prompt)
+
+  """
+  @doc type: :tokenizer
+  @spec apply_chat_template(Bumblebee.Tokenizer.t(), list(map()), keyword()) :: String.t()
+  def apply_chat_template(tokenizer, messages, opts \\ []) do
+    opts =
+      Keyword.validate!(opts, [
+        :tools,
+        :documents,
+        :chat_template,
+        add_generation_prompt: false,
+        continue_final_message: false,
+        variables: %{}
+      ])
+
+    unless Code.ensure_loaded?(Otera.ChatTemplate) do
+      raise RuntimeError,
+            "Bumblebee.apply_chat_template/3 requires the :otera dependency," <>
+              " add {:otera, \"~> 0.2\"} to your dependencies"
+    end
+
+    template = select_chat_template(tokenizer.chat_template, opts[:chat_template], opts[:tools])
+
+    variables =
+      Map.merge(
+        tokenizer.chat_template_tokens,
+        Map.new(opts[:variables], fn {k, v} -> {to_string(k), v} end)
+      )
+
+    render_opts =
+      [
+        add_generation_prompt: opts[:add_generation_prompt],
+        continue_final_message: opts[:continue_final_message],
+        variables: variables
+      ] ++ Keyword.take(opts, [:tools, :documents])
+
+    case Otera.ChatTemplate.render(template, messages, render_opts) do
+      {:ok, prompt} -> prompt
+      {:error, exception} -> raise exception
+    end
+  end
+
+  defp select_chat_template(nil, _name, _tools) do
+    raise ArgumentError,
+          "the tokenizer has no chat template, the model repository does not define one"
+  end
+
+  defp select_chat_template(template, nil, _tools) when is_binary(template), do: template
+
+  defp select_chat_template(template, name, _tools) when is_binary(template) do
+    raise ArgumentError,
+          "the tokenizer has a single chat template, but got :chat_template #{inspect(name)}"
+  end
+
+  defp select_chat_template(templates, name, tools) when is_map(templates) do
+    name =
+      cond do
+        name -> name
+        tools && Map.has_key?(templates, "tool_use") -> "tool_use"
+        true -> "default"
+      end
+
+    case templates do
+      %{^name => template} ->
+        template
+
+      %{} ->
+        names = templates |> Map.keys() |> Enum.sort() |> Enum.map_join(", ", &inspect/1)
+        raise ArgumentError, "no chat template named #{inspect(name)}, available: #{names}"
+    end
+  end
+
+  @doc """
   Loads tokenizer from a model repository.
 
   ## Options
@@ -1007,8 +1130,20 @@ defmodule Bumblebee do
               {:ok, %{}}
             end
 
+          chat_template_result =
+            if Map.has_key?(repo_files, @chat_template_filename) do
+              etag = repo_files[@chat_template_filename]
+
+              with {:ok, path} <- download(repository, @chat_template_filename, etag) do
+                {:ok, File.read!(path)}
+              end
+            else
+              {:ok, nil}
+            end
+
           with {:ok, tokenizer_config} <- tokenizer_config_result,
-               {:ok, special_tokens_map} <- special_tokens_map_result do
+               {:ok, special_tokens_map} <- special_tokens_map_result,
+               {:ok, chat_template} <- chat_template_result do
             tokenizer = struct!(Bumblebee.Text.PreTrainedTokenizer, type: type)
 
             tokenizer =
@@ -1017,7 +1152,10 @@ defmodule Bumblebee do
                 # Note: special_tokens_map.json is a legacy file, now
                 # tokenizer_config.json includes the same information
                 # and takes precedence
-                "special_tokens_map" => Map.merge(tokenizer_config, special_tokens_map)
+                "special_tokens_map" => Map.merge(tokenizer_config, special_tokens_map),
+                # Note: chat_template.jinja takes precedence over the
+                # template in tokenizer_config.json, as in transformers
+                "chat_template" => chat_template || tokenizer_config["chat_template"]
               })
 
             {:ok, tokenizer}

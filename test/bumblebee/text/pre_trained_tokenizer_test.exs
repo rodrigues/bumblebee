@@ -649,4 +649,162 @@ defmodule Bumblebee.Text.PreTrainedTokenizerTest do
     assert_equal(inputs["input_ids"], Nx.tensor([[101, 1188, 1110, 170, 102]]))
     assert_equal(inputs["attention_mask"], Nx.tensor([[1, 1, 1, 1, 1]]))
   end
+
+  describe "chat template" do
+    test "renders the template from tokenizer_config.json" do
+      assert {:ok, tokenizer} = Bumblebee.load_tokenizer({:hf, "unsloth/gemma-7b-it"})
+
+      messages = [
+        %{"role" => "user", "content" => "What is the capital of Brazil?"},
+        %{"role" => "assistant", "content" => "Brasília."},
+        %{"role" => "user", "content" => "And of France?"}
+      ]
+
+      assert Bumblebee.apply_chat_template(tokenizer, messages, add_generation_prompt: true) ==
+               "<bos><start_of_turn>user\nWhat is the capital of Brazil?<end_of_turn>\n" <>
+                 "<start_of_turn>model\nBrasília.<end_of_turn>\n" <>
+                 "<start_of_turn>user\nAnd of France?<end_of_turn>\n<start_of_turn>model\n"
+
+      messages = [%{"role" => "user", "content" => "Hi"}]
+
+      assert Bumblebee.apply_chat_template(tokenizer, messages) ==
+               "<bos><start_of_turn>user\nHi<end_of_turn>\n"
+    end
+
+    test "continues the final message" do
+      assert {:ok, tokenizer} = Bumblebee.load_tokenizer({:hf, "unsloth/gemma-7b-it"})
+
+      messages = [
+        %{"role" => "user", "content" => "Write a haiku."},
+        %{"role" => "assistant", "content" => "Processes awake,"}
+      ]
+
+      assert Bumblebee.apply_chat_template(tokenizer, messages, continue_final_message: true) ==
+               "<bos><start_of_turn>user\nWrite a haiku.<end_of_turn>\n" <>
+                 "<start_of_turn>model\nProcesses awake,"
+    end
+
+    test "encodes the prompt without adding special tokens twice" do
+      assert {:ok, tokenizer} = Bumblebee.load_tokenizer({:hf, "unsloth/gemma-7b-it"})
+
+      messages = [%{"role" => "user", "content" => "Hi"}]
+      prompt = Bumblebee.apply_chat_template(tokenizer, messages, add_generation_prompt: true)
+
+      tokenizer = Bumblebee.configure(tokenizer, add_special_tokens: false)
+      inputs = Bumblebee.apply_tokenizer(tokenizer, prompt)
+
+      assert_equal(
+        inputs["input_ids"],
+        Nx.tensor([[2, 106, 1645, 108, 2151, 107, 108, 106, 2516, 108]])
+      )
+    end
+
+    test "renders the template from chat_template.jinja" do
+      assert {:ok, tokenizer} = Bumblebee.load_tokenizer({:hf, "HuggingFaceTB/SmolLM3-3B"})
+
+      assert tokenizer.chat_template =~ "{%- if enable_thinking is not defined -%}"
+
+      messages = [%{"role" => "user", "content" => "What is the capital of Brazil?"}]
+
+      prompt = Bumblebee.apply_chat_template(tokenizer, messages, add_generation_prompt: true)
+      assert prompt =~ "Reasoning Mode: /think\n"
+
+      assert String.ends_with?(
+               prompt,
+               "<|im_start|>user\nWhat is the capital of Brazil?<|im_end|>\n<|im_start|>assistant\n"
+             )
+
+      prompt =
+        Bumblebee.apply_chat_template(tokenizer, messages,
+          add_generation_prompt: true,
+          variables: %{"enable_thinking" => false}
+        )
+
+      assert prompt =~ "Reasoning Mode: /no_think\n"
+    end
+
+    test "passes special tokens the tokenizer type does not track" do
+      assert {:ok, tokenizer} =
+               Bumblebee.load_tokenizer({:hf, "mistralai/Mistral-7B-Instruct-v0.3"})
+
+      messages = [%{"role" => "user", "content" => "What is the capital of Brazil?"}]
+
+      assert Bumblebee.apply_chat_template(tokenizer, messages) ==
+               "<s>[INST] What is the capital of Brazil?[/INST]"
+    end
+
+    test "selects among named templates" do
+      assert {:ok, tokenizer} =
+               Bumblebee.load_tokenizer({:hf, "NousResearch/Hermes-2-Pro-Llama-3-8B"})
+
+      assert %{"default" => _, "tool_use" => _} = tokenizer.chat_template
+
+      messages = [%{"role" => "user", "content" => "Hi"}]
+
+      tools = [
+        %{
+          "type" => "function",
+          "function" => %{
+            "name" => "get_weather",
+            "description" => "Get the weather.",
+            "parameters" => %{
+              "type" => "object",
+              "properties" => %{"city" => %{"type" => "string"}},
+              "required" => ["city"]
+            }
+          }
+        }
+      ]
+
+      default_prompt =
+        "<|begin_of_text|><|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n"
+
+      assert Bumblebee.apply_chat_template(tokenizer, messages, add_generation_prompt: true) ==
+               default_prompt
+
+      prompt =
+        Bumblebee.apply_chat_template(tokenizer, messages,
+          add_generation_prompt: true,
+          tools: tools
+        )
+
+      assert prompt =~ "<|im_start|>system\nYou are a function calling AI model."
+      assert prompt =~ "\"name\": \"get_weather\""
+
+      assert Bumblebee.apply_chat_template(tokenizer, messages,
+               add_generation_prompt: true,
+               tools: tools,
+               chat_template: "default"
+             ) == default_prompt
+
+      assert_raise ArgumentError,
+                   ~s/no chat template named "rag", available: "default", "tool_use"/,
+                   fn ->
+                     Bumblebee.apply_chat_template(tokenizer, messages, chat_template: "rag")
+                   end
+    end
+
+    test "raises when the repository has no chat template" do
+      assert {:ok, tokenizer} = Bumblebee.load_tokenizer({:hf, "openai-community/gpt2"})
+
+      assert tokenizer.chat_template == nil
+
+      assert_raise ArgumentError, ~r/the tokenizer has no chat template/, fn ->
+        Bumblebee.apply_chat_template(tokenizer, [%{"role" => "user", "content" => "Hi"}])
+      end
+    end
+
+    test "raises the template error" do
+      assert {:ok, tokenizer} = Bumblebee.load_tokenizer({:hf, "unsloth/gemma-7b-it"})
+
+      messages = [
+        %{"role" => "system", "content" => "Be terse."},
+        %{"role" => "user", "content" => "Hi"}
+      ]
+
+      assert_raise Otera.Error, ~r/System role not supported/, fn ->
+        Bumblebee.apply_chat_template(tokenizer, messages)
+      end
+    end
+  end
 end
