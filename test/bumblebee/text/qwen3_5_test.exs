@@ -159,6 +159,17 @@ defmodule Bumblebee.Text.Qwen3_5Test do
     assert_all_close(padded.logits[[.., 2..-1//1]], unpadded.logits, atol: 1.0e-5)
   end
 
+  test "loads generation attributes from the text configuration" do
+    # Multimodal checkpoints without generation_config.json keep the
+    # token ids in the nested text configuration
+    data = %{"model_type" => "qwen3_5", "text_config" => %{"eos_token_id" => 248_044}}
+
+    config =
+      Bumblebee.HuggingFace.Transformers.Config.load(%Bumblebee.Text.GenerationConfig{}, data)
+
+    assert config.eos_token_id == 248_044
+  end
+
   test "refuses the mixture-of-experts variant" do
     path = Path.join(System.tmp_dir!(), "bumblebee-qwen3_5-moe")
     File.mkdir_p!(path)

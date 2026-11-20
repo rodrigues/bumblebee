@@ -257,6 +257,7 @@ defmodule Bumblebee.Text.GenerationConfig do
       data =
         case data do
           %{"model_type" => "blip", "text_config" => data} -> data
+          %{"model_type" => "qwen3_5", "text_config" => data} -> data
           data -> data
         end
 
