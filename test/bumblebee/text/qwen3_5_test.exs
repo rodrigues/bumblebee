@@ -139,6 +139,40 @@ defmodule Bumblebee.Text.Qwen3_5Test do
     assert_equal(token_ids, Nx.tensor([[279, 537, 784, 485, 860, 775, 279, 973]]))
   end
 
+  test "inputs spanning several chunks of the linear attention" do
+    assert {:ok, %{model: model, params: params}} =
+             Bumblebee.load_model({:hf, "bumblebee-testing/tiny-random-Qwen3_5ForCausalLM"})
+
+    # The random decay forgets within a few tokens, so a slower one makes
+    # the state carried from one chunk to the next affect the output
+    params =
+      update_in(params.data, fn data ->
+        Map.new(data, fn
+          {"decoder.blocks." <> _ = name, %{"a_log" => a_log} = layer} ->
+            {name, %{layer | "a_log" => Nx.fill(a_log, -4.0)}}
+
+          entry ->
+            entry
+        end)
+      end)
+
+    inputs = %{
+      "input_ids" => Nx.iota({1, 150}) |> Nx.multiply(7) |> Nx.remainder(1000) |> Nx.add(1)
+    }
+
+    outputs = Axon.predict(model, params, inputs)
+
+    assert_all_close(
+      Nx.take(outputs.logits[[0, .., 1..3]], Nx.tensor([63, 64, 149])),
+      Nx.tensor([
+        [-1.3670, -0.1720, 0.6075],
+        [-1.4485, -2.4142, 0.4497],
+        [0.1250, -1.4308, 0.4002]
+      ]),
+      atol: 1.0e-4
+    )
+  end
+
   test "left padding gives the same logits as unpadded inputs" do
     assert {:ok, %{model: model, params: params}} =
              Bumblebee.load_model({:hf, "bumblebee-testing/tiny-random-Qwen3_5ForCausalLM"})

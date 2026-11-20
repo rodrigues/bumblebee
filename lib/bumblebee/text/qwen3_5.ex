@@ -666,13 +666,19 @@ defmodule Bumblebee.Text.Qwen3_5 do
     -Nx.exp(Nx.as_type(a_log, :f32)) * softplus
   end
 
-  # Decoding a single token needs one step of the recurrence, without
-  # the loop over the sequence
+  @chunk_size 64
+
+  # Decoding a single token needs one step of the recurrence, while longer
+  # inputs are processed in chunks, as in the chunked form of the reference
+  # implementation
   deftransformp gated_delta_rule(query, key, value, beta, decay, state) do
-    if Nx.axis_size(value, 1) == 1 do
+    sequence_length = Nx.axis_size(value, 1)
+
+    if sequence_length == 1 do
       gated_delta_rule_single(query, key, value, beta, decay, state)
     else
-      gated_delta_rule_loop(query, key, value, beta, decay, state)
+      padding = rem(@chunk_size - rem(sequence_length, @chunk_size), @chunk_size)
+      gated_delta_rule_chunked(query, key, value, beta, decay, state, padding: padding)
     end
   end
 
@@ -692,33 +698,145 @@ defmodule Bumblebee.Text.Qwen3_5 do
     {Nx.new_axis(output, 1), state}
   end
 
-  # Processes the sequence one token at a time, updating the recurrent
-  # state with the delta rule, as in the recurrent form of the reference
-  # implementation
-  defnp gated_delta_rule_loop(query, key, value, beta, decay, state) do
+  # Within a chunk, the delta rule updates are condensed into matrix
+  # products by solving a unit lower triangular system, so the loop runs
+  # once per chunk instead of once per token
+  defnp gated_delta_rule_chunked(query, key, value, beta, decay, state, opts \\ []) do
+    opts = keyword!(opts, [:padding])
     {query, key} = normalize_query_key(query, key)
+    {batch_size, sequence_length, num_heads, value_head_size} = Nx.shape(value)
 
-    sequence_length = Nx.axis_size(value, 1)
-    output = Nx.broadcast(0.0, value)
+    query = to_chunks(query, opts[:padding])
+    key = to_chunks(key, opts[:padding])
+    value = to_chunks(value, opts[:padding])
+    beta = to_chunks(beta, opts[:padding])
+    decay = to_chunks(decay, opts[:padding])
 
-    {output, state, _query, _key, _value, _beta, _decay, _index} =
-      while {output, state, query, key, value, beta, decay, index = 0},
-            index < sequence_length do
-        {o, state} =
-          delta_step(
-            take_step(query, index),
-            take_step(key, index),
-            take_step(value, index),
-            take_step(beta, index),
-            take_step(decay, index),
-            state
-          )
+    key_beta = key * Nx.new_axis(beta, -1)
+    value_beta = value * Nx.new_axis(beta, -1)
 
-        output = Nx.put_slice(output, [0, index, 0, 0], Nx.new_axis(o, 1))
-        {output, state, query, key, value, beta, decay, index + 1}
-      end
+    # The decay accumulated from the start of the chunk to each position,
+    # and between each pair of positions
+    cumulative_decay = Nx.cumulative_sum(decay, axis: 3)
+
+    lower =
+      Nx.greater_equal(
+        Nx.iota({@chunk_size, @chunk_size}, axis: 0),
+        Nx.iota({@chunk_size, @chunk_size}, axis: 1)
+      )
+
+    pairwise = Nx.new_axis(cumulative_decay, 4) - Nx.new_axis(cumulative_decay, 3)
+
+    pairwise_decay =
+      Nx.exp(Nx.select(Nx.broadcast(lower, pairwise), pairwise, Nx.Constants.neg_infinity(:f32)))
+
+    system = Nx.dot(key_beta, [4], [0, 1, 2], key, [4], [0, 1, 2]) * pairwise_decay
+    intra_chunk = Nx.dot(query, [4], [0, 1, 2], key, [4], [0, 1, 2]) * pairwise_decay
+    inverse = unit_lower_triangular_inverse(system)
+
+    new_values = Nx.dot(inverse, [4], [0, 1, 2], value_beta, [3], [0, 1, 2])
+    decayed_key_beta = key_beta * Nx.new_axis(Nx.exp(cumulative_decay), -1)
+    key_cumulative_decay = Nx.dot(inverse, [4], [0, 1, 2], decayed_key_beta, [3], [0, 1, 2])
+
+    last_decay = Nx.slice_along_axis(cumulative_decay, @chunk_size - 1, 1, axis: 3)
+    query = query * Nx.new_axis(Nx.exp(cumulative_decay), -1)
+    key = key * Nx.new_axis(Nx.exp(last_decay - cumulative_decay), -1)
+    chunk_decay = Nx.new_axis(Nx.exp(last_decay), -1)
+
+    {output, state} =
+      chunk_scan(query, key, new_values, key_cumulative_decay, intra_chunk, chunk_decay, state)
+
+    output =
+      output
+      |> Nx.reshape({batch_size, num_heads, :auto, value_head_size})
+      |> Nx.slice_along_axis(0, sequence_length, axis: 2)
+      |> Nx.transpose(axes: [0, 2, 1, 3])
 
     {output, state}
+  end
+
+  # Moves the heads before the sequence, pads the sequence to whole chunks
+  # and splits it into chunks
+  deftransformp to_chunks(tensor, padding) do
+    [batch_size, sequence_length, num_heads | rest] = tensor |> Nx.shape() |> Tuple.to_list()
+    axes = [0, 2, 1 | Enum.drop(Nx.axes(tensor), 3)]
+
+    padding_config = [
+      {0, 0, 0},
+      {0, 0, 0},
+      {0, padding, 0} | Enum.map(rest, fn _ -> {0, 0, 0} end)
+    ]
+
+    num_chunks = div(sequence_length + padding, @chunk_size)
+
+    tensor
+    |> Nx.transpose(axes: axes)
+    |> Nx.pad(0.0, padding_config)
+    |> Nx.reshape(List.to_tuple([batch_size, num_heads, num_chunks, @chunk_size | rest]))
+  end
+
+  # The number of chunks is known when building the graph, so the loop is
+  # unrolled into a single graph
+  deftransformp chunk_scan(
+                  query,
+                  key,
+                  new_values,
+                  key_cumulative_decay,
+                  intra_chunk,
+                  chunk_decay,
+                  state
+                ) do
+    num_chunks = Nx.axis_size(new_values, 2)
+
+    {outputs, state} =
+      Enum.map_reduce(0..(num_chunks - 1), state, fn index, state ->
+        take = &(&1 |> Nx.slice_along_axis(index, 1, axis: 2) |> Nx.squeeze(axes: [2]))
+
+        delta =
+          Nx.subtract(
+            take.(new_values),
+            Nx.dot(take.(key_cumulative_decay), [3], [0, 1], state, [2], [0, 1])
+          )
+
+        output =
+          Nx.add(
+            Nx.dot(take.(query), [3], [0, 1], state, [2], [0, 1]),
+            Nx.dot(take.(intra_chunk), [3], [0, 1], delta, [2], [0, 1])
+          )
+
+        state =
+          Nx.add(
+            Nx.multiply(state, take.(chunk_decay)),
+            Nx.dot(take.(key), [2], [0, 1], delta, [2], [0, 1])
+          )
+
+        {output, state}
+      end)
+
+    {Nx.stack(outputs, axis: 2), state}
+  end
+
+  # The inverse of the identity plus the strictly lower part L of each
+  # matrix. L is nilpotent, so the inverse is the finite series
+  # I - L + L^2 - ..., computed as (I - L)(I + L^2)(I + L^4)...
+  deftransformp unit_lower_triangular_inverse(system) do
+    size = Nx.axis_size(system, -1)
+    strictly_lower = Nx.greater(Nx.iota({size, size}, axis: 0), Nx.iota({size, size}, axis: 1))
+    power = Nx.negate(Nx.select(Nx.broadcast(strictly_lower, system), system, 0.0))
+    identity = Nx.eye(size)
+    steps = ceil(:math.log2(size)) - 1
+
+    {inverse, _power} =
+      Enum.reduce(1..steps, {Nx.add(identity, power), power}, fn _, {inverse, power} ->
+        power = batched_matmul(power, power)
+        {batched_matmul(inverse, Nx.add(identity, power)), power}
+      end)
+
+    inverse
+  end
+
+  deftransformp batched_matmul(left, right) do
+    Nx.dot(left, [4], [0, 1, 2], right, [3], [0, 1, 2])
   end
 
   defnp normalize_query_key(query, key) do
@@ -731,12 +849,6 @@ defmodule Bumblebee.Text.Qwen3_5 do
     delta = (v - memory) * Nx.new_axis(b, -1)
     state = state + Nx.new_axis(k, -1) * Nx.new_axis(delta, 2)
     {Nx.sum(state * Nx.new_axis(q, -1), axes: [2]), state}
-  end
-
-  defnp take_step(tensor, index) do
-    tensor
-    |> Nx.slice_along_axis(index, 1, axis: 1)
-    |> Nx.squeeze(axes: [1])
   end
 
   defnp l2_normalize(x) do
