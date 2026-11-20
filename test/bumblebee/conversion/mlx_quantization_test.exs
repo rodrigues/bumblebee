@@ -96,6 +96,27 @@ defmodule Bumblebee.Conversion.MLXQuantizationTest do
     )
   end
 
+  test "Qwen3.5 logits match mlx-lm" do
+    assert {:ok, %{model: model, params: params}} =
+             Bumblebee.load_model(
+               {:hf, "bumblebee-testing/tiny-random-Qwen3_5ForConditionalGeneration-mlx-4bit"},
+               backend: @backend
+             )
+
+    assert EMLX.Quantization.quantized?(
+             params.data["decoder.blocks.0.linear_attention.query_key_value"]["kernel"]
+           )
+
+    # Reference values from mlx-lm 0.32.2
+    assert_all_close(
+      predict(model, params)[[.., 1..3, 1..3]],
+      Nx.tensor([
+        [[-0.0165, -0.2746, 1.0480], [0.2671, 2.3714, 0.2874], [1.1254, -0.2586, -0.1098]]
+      ]),
+      atol: 1.0e-3
+    )
+  end
+
   test "raises without the EMLX backend" do
     assert_raise ArgumentError, ~r/loading MLX quantized weights requires the EMLX backend/, fn ->
       Bumblebee.load_model(@repo_4bit, backend: Nx.BinaryBackend)
