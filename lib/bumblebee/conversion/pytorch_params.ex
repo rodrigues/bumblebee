@@ -4,6 +4,7 @@ defmodule Bumblebee.Conversion.PyTorchParams do
   require Logger
 
   alias Bumblebee.Utils
+  alias Bumblebee.Conversion.MLXQuantization
 
   @doc """
   Loads parameters from a PyTorch model state dictionary.
@@ -28,6 +29,10 @@ defmodule Bumblebee.Conversion.PyTorchParams do
       and loads the params file. Defaults to
       `Bumblebee.Conversion.PyTorchLoader.load!/1`
 
+    * `:quantization` - the "quantization" entry of an MLX checkpoint
+      configuration. When given, quantized weights are loaded as EMLX
+      quantized tensors
+
   """
   @spec load_params!(Axon.t(), map(), Path.t() | list(Path.t()), keyword()) :: %Axon.ModelState{}
   def load_params!(model, input_template, path, opts \\ []) do
@@ -36,6 +41,7 @@ defmodule Bumblebee.Conversion.PyTorchParams do
       |> Keyword.validate!([
         :log_params_diff,
         :backend,
+        :quantization,
         params_mapping: %{},
         loader_fun: &Bumblebee.Conversion.PyTorchLoader.load!/1
       ])
@@ -54,6 +60,14 @@ defmodule Bumblebee.Conversion.PyTorchParams do
           pytorch_state
         end)
         |> Enum.reduce(&Map.merge/2)
+
+      pytorch_state =
+        if quantization = opts[:quantization] do
+          MLXQuantization.validate!(quantization, opts[:backend])
+          MLXQuantization.quantize_state(pytorch_state, quantization)
+        else
+          pytorch_state
+        end
 
       model_state = Axon.trace_init(model, input_template)
 
@@ -115,11 +129,12 @@ defmodule Bumblebee.Conversion.PyTorchParams do
           Enum.reduce(layer.parameters, {[], diff}, fn param, {params, diff} ->
             param_expr = params_expr[layer_name][param.name]
 
-            {sources, builder_fun} =
+            {sources, builder_fun, keep_quantized?} =
               case params_source do
                 %{} = param_builders ->
                   if param_builder = param_builders[param.name] do
-                    param_builder
+                    {sources, builder_fun} = param_builder
+                    {sources, builder_fun, false}
                   else
                     raise "no matching mapping found for parameter #{inspect(param.name)} in #{inspect(param_builders)}"
                   end
@@ -127,7 +142,14 @@ defmodule Bumblebee.Conversion.PyTorchParams do
                 source_layer_name
                 when is_binary(source_layer_name) or
                        is_list(source_layer_name) ->
-                  default_layer_param_builder(layer, param.name, source_layer_name)
+                  {sources, builder_fun} =
+                    default_layer_param_builder(layer, param.name, source_layer_name)
+
+                  # Only plain matrix multiplications run on quantized weights
+                  keep_quantized? =
+                    layer.op_name in [:dense, :dense_transposed] and param.name == "kernel"
+
+                  {sources, builder_fun, keep_quantized?}
               end
 
             {all_sources_found?, source_values, source_keys} =
@@ -151,6 +173,12 @@ defmodule Bumblebee.Conversion.PyTorchParams do
             {value, diff} =
               if all_sources_found? do
                 source_values = Enum.map(source_values, &Nx.to_tensor/1)
+
+                source_values =
+                  if keep_quantized?,
+                    do: source_values,
+                    else: Enum.map(source_values, &MLXQuantization.dequantize/1)
+
                 value = builder_fun.(Enum.reverse(source_values))
 
                 case verify_param_shape(param_expr, value) do
@@ -510,8 +538,13 @@ defmodule Bumblebee.Conversion.PyTorchParams do
   defp ensure_type(param_expr, value) do
     Utils.Nx.zip_with(param_expr, value, fn expr, tensor ->
       case {Nx.type(expr), Nx.type(tensor)} do
-        {type, type} -> tensor
-        {expected, _actual} -> Nx.as_type(tensor, expected)
+        {type, type} ->
+          tensor
+
+        _ ->
+          if MLXQuantization.quantized?(tensor),
+            do: tensor,
+            else: Nx.as_type(tensor, Nx.type(expr))
       end
     end)
   end
