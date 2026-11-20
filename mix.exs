@@ -108,6 +108,7 @@ defmodule Bumblebee.MixProject do
           Bumblebee.Text.Phi,
           Bumblebee.Text.Phi3,
           Bumblebee.Text.Qwen3,
+          Bumblebee.Text.Qwen3_5,
           Bumblebee.Text.Roberta,
           Bumblebee.Text.SigLipText,
           Bumblebee.Text.SmolLm3,
