@@ -565,6 +565,24 @@ defmodule Bumblebee do
   If you want to use a lower precision for inference, make sure to
   also specify `:type`.
 
+  ## MLX quantized checkpoints
+
+  Checkpoints quantized with MLX, such as the ones published under
+  [mlx-community](https://huggingface.co/mlx-community), load on the
+  [EMLX](https://github.com/elixir-nx/emlx) backend, which runs matrix
+  multiplications directly on the quantized weights. Their memory use
+  is close to the size of the checkpoint files:
+
+      {:ok, model_info} =
+        Bumblebee.load_model({:hf, "mlx-community/Qwen3-4B-Instruct-2507-4bit"},
+          backend: {EMLX.Backend, device: :gpu},
+          type: :bf16
+        )
+
+  The weights of dense layers stay quantized, and other weights, such
+  as embedding tables, are dequantized when loading. Only the affine
+  quantization mode is supported.
+
   ## Options
 
     * `:spec` - the model specification to use when building the model.
@@ -687,15 +705,31 @@ defmodule Bumblebee do
       |> Path.extname()
       |> params_file_loader_fun(opts)
 
-    with {:ok, paths} <- download_params_files(repository, repo_files, filename, sharded?) do
+    with {:ok, paths} <- download_params_files(repository, repo_files, filename, sharded?),
+         {:ok, quantization} <- load_quantization(repository, repo_files) do
       opts =
         [
           params_mapping: params_mapping,
-          loader_fun: loader_fun
+          loader_fun: loader_fun,
+          quantization: quantization
         ] ++ Keyword.take(opts, [:backend, :log_params_diff])
 
       params = Bumblebee.Conversion.PyTorchParams.load_params!(model, input_template, paths, opts)
       {:ok, params}
+    end
+  end
+
+  # MLX quantized checkpoints describe their quantization under this key
+  defp load_quantization(repository, repo_files) do
+    case repo_files do
+      %{@config_filename => etag} ->
+        with {:ok, path} <- download(repository, @config_filename, etag),
+             {:ok, config} <- decode_config(path) do
+          {:ok, config["quantization"]}
+        end
+
+      %{} ->
+        {:ok, nil}
     end
   end
 
