@@ -46,7 +46,7 @@ defmodule Bumblebee.MixProject do
       {:bypass, "~> 2.1", only: :test},
       {:ex_doc, "~> 0.28", only: :dev, runtime: false},
       {:nx_signal, "~> 0.4.0"},
-      {:emlx, "~> 0.5", optional: true}
+      {:emlx, path: "../emlx/emlx", optional: true, override: true}
     ]
   end
 
