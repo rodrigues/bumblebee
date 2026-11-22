@@ -7,9 +7,7 @@ defmodule Bumblebee.Text.Qwen3_5Test do
 
   test ":base" do
     assert {:ok, %{model: model, params: params, spec: spec}} =
-             Bumblebee.load_model({:hf, "bumblebee-testing/tiny-random-Qwen3_5ForCausalLM"},
-               architecture: :base
-             )
+             Bumblebee.load_model({:hf, "bumblebee-testing/tiny-random-Qwen3_5TextModel"})
 
     assert %Bumblebee.Text.Qwen3_5{architecture: :base} = spec
 
@@ -33,7 +31,7 @@ defmodule Bumblebee.Text.Qwen3_5Test do
     assert_all_close(
       outputs.hidden_state[[.., 1..3, 1..3]],
       Nx.tensor([
-        [[1.4133, 0.5996, -2.3100], [1.2465, 0.0291, 0.3573], [-1.9832, -0.8136, 0.5604]]
+        [[0.5431, -1.7083, -1.5362], [-0.3338, -1.6407, -0.5881], [-0.2545, -0.8469, -0.0288]]
       ]),
       atol: 1.0e-4
     )

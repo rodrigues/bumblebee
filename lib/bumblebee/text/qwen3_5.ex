@@ -953,14 +953,22 @@ defmodule Bumblebee.Text.Qwen3_5 do
   defimpl Bumblebee.HuggingFace.Transformers.Model do
     def params_mapping(spec) do
       # Text-only, multimodal and MLX checkpoints store the language
-      # model under different prefixes
-      layer = fn name ->
-        [
-          "model." <> name,
-          "model.language_model." <> name,
-          "language_model.model." <> name
-        ]
-      end
+      # model under different prefixes. Without a head, the prefix is
+      # inferred on load, which also covers the unprefixed base checkpoint
+      layer =
+        case spec.architecture do
+          :base ->
+            fn name -> [name] end
+
+          :for_causal_language_modeling ->
+            fn name ->
+              [
+                "model." <> name,
+                "model.language_model." <> name,
+                "language_model.model." <> name
+              ]
+            end
+        end
 
       # MLX checkpoints store these norm weights with the shift of 1
       # added, and the convolution kernel as {channels, kernel_size, 1}
@@ -979,7 +987,7 @@ defmodule Bumblebee.Text.Qwen3_5 do
         }
       end
 
-      %{
+      mapping = %{
         "embedder.token_embedding" => layer.("embed_tokens"),
         "decoder.blocks.{n}.self_attention_norm" => norm.("layers.{n}.input_layernorm"),
         "decoder.blocks.{n}.self_attention.query" => layer.("layers.{n}.self_attn.q_proj"),
@@ -1020,6 +1028,11 @@ defmodule Bumblebee.Text.Qwen3_5 do
             else: ["lm_head", "language_model.lm_head"]
           )
       }
+
+      case spec.architecture do
+        :base -> Map.delete(mapping, "language_modeling_head.output")
+        :for_causal_language_modeling -> mapping
+      end
     end
 
     defp param_refs(layer_names, param_name) do
