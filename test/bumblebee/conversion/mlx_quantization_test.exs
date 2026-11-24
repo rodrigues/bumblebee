@@ -68,8 +68,9 @@ defmodule Bumblebee.Conversion.MLXQuantizationTest do
         size = elem(Nx.shape(kernel), axis)
         input = Nx.iota({1, 8, size}, backend: Nx.BinaryBackend) |> Nx.divide(size) |> Nx.sin()
 
-        # The reference runs on the binary backend, because unquantized MLX float32
-        # products of several rows differ from the exact result by up to 7.4e-4
+        # The reference runs on the binary backend, because MLX computes float32
+        # products of several rows in TF32 by default on GPUs with neural
+        # accelerators, such as the M5, up to 7.4e-4 from the exact result
         dense = kernel |> EMLX.Quantization.dequantize() |> to_binary_backend()
         expected = Nx.dot(input, [2], dense, [axis])
 
@@ -85,8 +86,9 @@ defmodule Bumblebee.Conversion.MLXQuantizationTest do
     assert {:ok, %{model: model, params: params}} =
              Bumblebee.load_model(@repo_4bit, backend: @backend)
 
-    # Reference values from mlx-lm 0.32.2. The tolerance covers MLX's float32
-    # matrix products, which differ from the exact result by up to 7.4e-4.
+    # Reference values from mlx-lm 0.32.2 in full float32. The tolerance covers
+    # mlx-lm always using SiLU, while this checkpoint sets GELU, 3.5e-4 apart,
+    # and MLX's default TF32 products on GPUs with neural accelerators
     assert_all_close(
       predict(model, params)[[.., 1..3, 1..3]],
       Nx.tensor([
