@@ -30,11 +30,11 @@ defmodule Bumblebee.Text.Qwen3_5 do
         default: 24,
         doc: "the number of blocks in the model"
       ],
-      block_types: [
+      layer_types: [
         default: nil,
         doc: """
-        the type of each block, either `:linear_attention` or `:full_attention`.
-        Defaults to `:full_attention` for every fourth block and `:linear_attention`
+        the type of each layer, either `:linear_attention` or `:full_attention`.
+        Defaults to `:full_attention` for every fourth layer and `:linear_attention`
         for the others
         """
       ],
@@ -179,18 +179,18 @@ defmodule Bumblebee.Text.Qwen3_5 do
   def config(spec, opts) do
     spec = Shared.put_config_attrs(spec, opts)
 
-    block_types =
-      spec.block_types ||
+    layer_types =
+      spec.layer_types ||
         for index <- 0..(spec.num_blocks - 1) do
           if rem(index + 1, 4) == 0, do: :full_attention, else: :linear_attention
         end
 
-    if length(block_types) != spec.num_blocks do
+    if length(layer_types) != spec.num_blocks do
       raise ArgumentError,
-            "expected :block_types to have #{spec.num_blocks} entries, got: #{length(block_types)}"
+            "expected :layer_types to have #{spec.num_blocks} entries, got: #{length(layer_types)}"
     end
 
-    %{spec | block_types: block_types}
+    %{spec | layer_types: layer_types}
   end
 
   @impl true
@@ -231,7 +231,7 @@ defmodule Bumblebee.Text.Qwen3_5 do
     blocks =
       cache.blocks
       |> Tuple.to_list()
-      |> Enum.zip_with(spec.block_types, fn
+      |> Enum.zip_with(spec.layer_types, fn
         block, :full_attention -> block
         block, :linear_attention -> %{block | self_attention: linear_attention}
       end)
@@ -329,7 +329,7 @@ defmodule Bumblebee.Text.Qwen3_5 do
         normalized = rms_norm(hidden_state, spec, name: join(name, "self_attention_norm"))
 
         {hidden_state, attention, self_attention_cache} =
-          case Enum.fetch!(spec.block_types, block.index) do
+          case Enum.fetch!(spec.layer_types, block.index) do
             :full_attention ->
               gated_attention(normalized, position_ids, block, spec,
                 name: join(name, "self_attention")
@@ -920,7 +920,7 @@ defmodule Bumblebee.Text.Qwen3_5 do
           max_positions: {"max_position_embeddings", number()},
           hidden_size: {"hidden_size", number()},
           num_blocks: {"num_hidden_layers", number()},
-          block_types:
+          layer_types:
             {"layer_types",
              list(
                mapping(%{

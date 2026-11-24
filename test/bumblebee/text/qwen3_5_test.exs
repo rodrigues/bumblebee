@@ -11,7 +11,7 @@ defmodule Bumblebee.Text.Qwen3_5Test do
 
     assert %Bumblebee.Text.Qwen3_5{architecture: :base} = spec
 
-    assert spec.block_types == [
+    assert spec.layer_types == [
              :linear_attention,
              :linear_attention,
              :linear_attention,
