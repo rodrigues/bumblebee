@@ -202,6 +202,26 @@ defmodule Bumblebee.Text.Qwen3_5Test do
     assert config.eos_token_id == 248_044
   end
 
+  test "uses the multimodal config to decide whether to tie output weights" do
+    for {outer, expected} <- [{%{"tie_word_embeddings" => false}, false}, {%{}, false}] do
+      data =
+        Map.merge(
+          %{
+            "model_type" => "qwen3_5",
+            "text_config" => %{
+              "model_type" => "qwen3_5_text",
+              "hidden_size" => 32,
+              "tie_word_embeddings" => true
+            }
+          },
+          outer
+        )
+
+      assert %Bumblebee.Text.Qwen3_5{hidden_size: 32, tie_word_embeddings: ^expected} =
+               Bumblebee.HuggingFace.Transformers.Config.load(%Bumblebee.Text.Qwen3_5{}, data)
+    end
+  end
+
   test "refuses the mixture-of-experts variant" do
     path = Path.join(System.tmp_dir!(), "bumblebee-qwen3_5-moe")
     File.mkdir_p!(path)

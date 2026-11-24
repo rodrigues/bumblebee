@@ -896,18 +896,16 @@ defmodule Bumblebee.Text.Qwen3_5 do
   end
 
   defimpl Bumblebee.HuggingFace.Transformers.Config do
+    def load(spec, %{"model_type" => "qwen3_5", "text_config" => %{} = text_config} = data) do
+      # The multimodal config controls whether the output head is tied.
+      text_config =
+        Map.put(text_config, "tie_word_embeddings", Map.get(data, "tie_word_embeddings", false))
+
+      load(spec, text_config)
+    end
+
     def load(spec, data) do
       import Shared.Converters
-
-      # Multimodal checkpoints nest the language model configuration
-      data =
-        case data do
-          %{"text_config" => text_data} ->
-            Map.put_new(text_data, "tie_word_embeddings", data["tie_word_embeddings"])
-
-          data ->
-            data
-        end
 
       # Qwen3.5 configurations set unused token ids to null
       data =
