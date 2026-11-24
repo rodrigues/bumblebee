@@ -171,6 +171,36 @@ defmodule Bumblebee.Text.Qwen3_5Test do
     )
   end
 
+  test "a repeated token spanning several chunks of the linear attention" do
+    assert {:ok, %{model: model, params: params}} =
+             Bumblebee.load_model({:hf, "bumblebee-testing/tiny-random-Qwen3_5ForCausalLM"})
+
+    # Identical keys with a slow decay make the triangular system of each
+    # chunk the hardest to solve accurately
+    params =
+      update_in(params.data, fn data ->
+        Map.new(data, fn
+          {"decoder.blocks." <> _ = name, %{"a_log" => a_log} = layer} ->
+            {name, %{layer | "a_log" => Nx.fill(a_log, -4.0)}}
+
+          entry ->
+            entry
+        end)
+      end)
+
+    outputs = Axon.predict(model, params, %{"input_ids" => Nx.broadcast(10, {1, 150})})
+
+    assert_all_close(
+      Nx.take(outputs.logits[[0, .., 1..3]], Nx.tensor([63, 64, 149])),
+      Nx.tensor([
+        [1.5815, -0.3145, 0.3124],
+        [1.5767, -0.3005, 0.2543],
+        [1.6945, 0.4724, -0.1081]
+      ]),
+      atol: 1.0e-4
+    )
+  end
+
   test "left padding gives the same logits as unpadded inputs" do
     assert {:ok, %{model: model, params: params}} =
              Bumblebee.load_model({:hf, "bumblebee-testing/tiny-random-Qwen3_5ForCausalLM"})

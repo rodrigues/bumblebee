@@ -732,11 +732,29 @@ defmodule Bumblebee.Text.Qwen3_5 do
 
     system = Nx.dot(key_beta, [4], [0, 1, 2], key, [4], [0, 1, 2]) * pairwise_decay
     intra_chunk = Nx.dot(query, [4], [0, 1, 2], key, [4], [0, 1, 2]) * pairwise_decay
-    inverse = unit_lower_triangular_inverse(system)
 
-    new_values = Nx.dot(inverse, [4], [0, 1, 2], value_beta, [3], [0, 1, 2])
+    strictly_lower =
+      Nx.greater(
+        Nx.iota({@chunk_size, @chunk_size}, axis: 0),
+        Nx.iota({@chunk_size, @chunk_size}, axis: 1)
+      )
+
+    unit_lower =
+      Nx.select(Nx.broadcast(strictly_lower, system), system, 0.0) + Nx.eye(@chunk_size)
+
     decayed_key_beta = key_beta * Nx.new_axis(Nx.exp(cumulative_decay), -1)
-    key_cumulative_decay = Nx.dot(inverse, [4], [0, 1, 2], decayed_key_beta, [3], [0, 1, 2])
+
+    solution =
+      Nx.LinAlg.triangular_solve(
+        unit_lower,
+        Nx.concatenate([value_beta, decayed_key_beta], axis: 4),
+        lower: true
+      )
+
+    new_values = Nx.slice_along_axis(solution, 0, value_head_size, axis: 4)
+
+    key_cumulative_decay =
+      Nx.slice_along_axis(solution, value_head_size, Nx.axis_size(decayed_key_beta, 4), axis: 4)
 
     last_decay = Nx.slice_along_axis(cumulative_decay, @chunk_size - 1, 1, axis: 3)
     query = query * Nx.new_axis(Nx.exp(cumulative_decay), -1)
@@ -814,29 +832,6 @@ defmodule Bumblebee.Text.Qwen3_5 do
       end)
 
     {Nx.stack(outputs, axis: 2), state}
-  end
-
-  # The inverse of the identity plus the strictly lower part L of each
-  # matrix. L is nilpotent, so the inverse is the finite series
-  # I - L + L^2 - ..., computed as (I - L)(I + L^2)(I + L^4)...
-  deftransformp unit_lower_triangular_inverse(system) do
-    size = Nx.axis_size(system, -1)
-    strictly_lower = Nx.greater(Nx.iota({size, size}, axis: 0), Nx.iota({size, size}, axis: 1))
-    power = Nx.negate(Nx.select(Nx.broadcast(strictly_lower, system), system, 0.0))
-    identity = Nx.eye(size)
-    steps = ceil(:math.log2(size)) - 1
-
-    {inverse, _power} =
-      Enum.reduce(1..steps, {Nx.add(identity, power), power}, fn _, {inverse, power} ->
-        power = batched_matmul(power, power)
-        {batched_matmul(inverse, Nx.add(identity, power)), power}
-      end)
-
-    inverse
-  end
-
-  deftransformp batched_matmul(left, right) do
-    Nx.dot(left, [4], [0, 1, 2], right, [3], [0, 1, 2])
   end
 
   defnp normalize_query_key(query, key) do
