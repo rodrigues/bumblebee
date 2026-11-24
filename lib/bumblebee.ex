@@ -1050,11 +1050,11 @@ defmodule Bumblebee do
   # As in transformers, keys set to nil are left out, and the reasoning
   # is given under each of its names, since templates read different ones
   defp normalize_chat_message(message) when is_map(message) do
+    # A runtime check, so Bumblebee compiles without the optional otera
     pairs =
-      case message do
-        %Otera.Dict{} -> Enum.to_list(message)
-        %{} -> Enum.sort(for {key, value} <- message, do: {to_string(key), value})
-      end
+      if is_struct(message, Otera.Dict),
+        do: Enum.to_list(message),
+        else: Enum.sort(for {key, value} <- message, do: {to_string(key), value})
 
     pairs = for {key, value} <- pairs, value != nil, do: {key, value}
 
