@@ -111,13 +111,13 @@ defmodule Bumblebee.Conversion.MLXQuantizationTest do
              params.data["decoder.blocks.0.linear_attention.query_key_value"]["kernel"]
            )
 
-    # Reference values from mlx-lm 0.32.2. Through the linear attention, MLX's
-    # float32 products put these logits 2.6e-3 from an exact computation with
-    # the same weights, and 3.1e-3 from mlx-lm, which runs it step by step
+    # Reference values from mlx-lm 0.32.2 in full float32. The tolerance covers
+    # MLX's default TF32 products on GPUs with neural accelerators, such as the
+    # M5, which put these logits 2.2e-3 from them
     assert_all_close(
       predict(model, params)[[.., 1..3, 1..3]],
       Nx.tensor([
-        [[-0.0165, -0.2746, 1.0480], [0.2671, 2.3714, 0.2874], [1.1254, -0.2586, -0.1098]]
+        [[-0.0157, -0.2715, 1.0506], [0.2680, 2.3709, 0.2856], [1.1244, -0.2576, -0.1090]]
       ]),
       atol: 5.0e-3
     )
