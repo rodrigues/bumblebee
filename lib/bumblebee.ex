@@ -165,6 +165,7 @@ defmodule Bumblebee do
     "GPTNeoXForCausalLM" => {Bumblebee.Text.GptNeoX, :for_causal_language_modeling},
     "GPTNeoXForSequenceClassification" => {Bumblebee.Text.GptNeoX, :for_sequence_classification},
     "GPTNeoXForTokenClassification" => {Bumblebee.Text.GptNeoX, :for_token_classification},
+    "KimiLinearForCausalLM" => {Bumblebee.Text.KimiLinear, :for_causal_language_modeling},
     "LayoutLMForMaskedLM" => {Bumblebee.Multimodal.LayoutLm, :for_masked_language_modeling},
     "LayoutLMForQuestionAnswering" => {Bumblebee.Multimodal.LayoutLm, :for_question_answering},
     "LayoutLMForSequenceClassification" =>
