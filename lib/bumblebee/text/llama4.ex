@@ -265,12 +265,12 @@ defmodule Bumblebee.Text.Llama4 do
 
   defp core(inputs, spec) do
     embeddings =
-      Layers.default inputs["input_embeddings"] do
-        Axon.embedding(inputs["input_ids"], spec.vocab_size, spec.hidden_size,
-          kernel_initializer: kernel_initializer(spec),
-          name: "embedder.token_embedding"
-        )
-      end
+      embedder(
+        inputs["input_ids"],
+        inputs["input_embeddings"],
+        spec,
+        name: "embedder"
+      )
 
     position_ids =
       Layers.default inputs["position_ids"] do
@@ -300,6 +300,17 @@ defmodule Bumblebee.Text.Llama4 do
       attentions: decoder_outputs.attentions,
       cache: decoder_outputs.cache
     }
+  end
+
+  defp embedder(input_ids, input_embeddings, spec, opts) do
+    name = opts[:name]
+
+    Layers.default input_embeddings do
+      Axon.embedding(input_ids, spec.vocab_size, spec.hidden_size,
+        kernel_initializer: kernel_initializer(spec),
+        name: join(name, "token_embedding")
+      )
+    end
   end
 
   defp decoder(
@@ -479,31 +490,35 @@ defmodule Bumblebee.Text.Llama4 do
 
   # Positions count from the start of the cache, as in transformers,
   # not from the position ids
-  defp scale_query(query, offset, opts) do
-    positions = Nx.iota({Nx.axis_size(query, 1)}) |> Nx.add(offset(offset))
+  defnp scale_query(query, offset, opts \\ []) do
+    opts = keyword!(opts, [:scale, :positions, mode: :inference])
 
-    scale =
-      positions
-      |> Nx.add(1)
-      |> Nx.as_type(Nx.type(query))
-      |> Nx.divide(opts[:positions])
-      |> Nx.floor()
-      |> Nx.log1p()
-      |> Nx.multiply(opts[:scale])
-      |> Nx.add(1)
+    positions = Nx.iota({Nx.axis_size(query, 1)}) + ensure_offset(offset)
+    steps = Nx.floor(Nx.as_type(positions + 1, Nx.type(query)) / opts[:positions])
+    scale = Nx.log1p(steps) * opts[:scale] + 1
 
-    Nx.multiply(query, Nx.reshape(scale, {1, :auto, 1, 1}))
+    query * Nx.reshape(scale, {1, :auto, 1, 1})
   end
 
-  defp chunk_bias(query, key, offset, opts) do
+  defnp chunk_bias(query, key, offset, opts \\ []) do
+    opts = keyword!(opts, [:size, mode: :inference])
+
     query_chunks =
-      Nx.iota({Nx.axis_size(query, 1)}) |> Nx.add(offset(offset)) |> Nx.quotient(opts[:size])
+      Nx.quotient(Nx.iota({Nx.axis_size(query, 1)}) + ensure_offset(offset), opts[:size])
 
-    key_chunks = Nx.iota({Nx.axis_size(key, 1)}) |> Nx.quotient(opts[:size])
+    key_chunks = Nx.quotient(Nx.iota({Nx.axis_size(key, 1)}), opts[:size])
 
-    Nx.equal(Nx.new_axis(query_chunks, 1), Nx.new_axis(key_chunks, 0))
+    Nx.new_axis(query_chunks, 1)
+    |> Nx.equal(Nx.new_axis(key_chunks, 0))
     |> Nx.select(Nx.tensor(0, type: Nx.type(query)), Nx.Constants.min_finite(Nx.type(query)))
     |> Nx.reshape({1, 1, Nx.axis_size(query, 1), Nx.axis_size(key, 1)})
+  end
+
+  defnp ensure_offset(offset) do
+    case offset do
+      %Axon.None{} -> 0
+      offset -> offset
+    end
   end
 
   defp unit_rms(x, epsilon) do
@@ -511,9 +526,6 @@ defmodule Bumblebee.Text.Llama4 do
     variance = f32 |> Nx.pow(2) |> Nx.mean(axes: [-1], keep_axes: true)
     f32 |> Nx.multiply(Nx.rsqrt(Nx.add(variance, epsilon))) |> Nx.as_type(Nx.type(x))
   end
-
-  defp offset(%Axon.None{}), do: 0
-  defp offset(offset), do: offset
 
   defp experts(hidden_state, spec, opts) do
     name = opts[:name]
