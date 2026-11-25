@@ -68,6 +68,34 @@ defmodule Bumblebee.Text.Qwen3 do
       use_qk_norm: [
         default: true,
         doc: "whether to use RMS normalization on query and key projections"
+      ],
+      num_experts: [
+        default: nil,
+        doc: """
+        the number of experts in the mixture-of-experts blocks. When `nil`, every block
+        uses a dense feed-forward network
+        """
+      ],
+      num_experts_per_token: [
+        default: 8,
+        doc: "the number of experts each token is routed to"
+      ],
+      expert_intermediate_size: [
+        default: 768,
+        doc: "the dimensionality of intermediate layers in each expert"
+      ],
+      expert_block_step: [
+        default: 1,
+        doc:
+          "every this many blocks use a mixture-of-experts block, starting from the last of each step"
+      ],
+      dense_block_indices: [
+        default: [],
+        doc: "the indices of blocks that use a dense feed-forward network instead of experts"
+      ],
+      normalize_top_k: [
+        default: true,
+        doc: "whether to normalize the router probabilities of the chosen experts to sum to 1"
       ]
     ] ++
       Shared.common_options([:rotary_embedding_scaling_strategy, :num_labels, :id_to_label]) ++
@@ -75,6 +103,9 @@ defmodule Bumblebee.Text.Qwen3 do
 
   @moduledoc """
   Qwen3 model family.
+
+  This module also covers Qwen3-MoE, where blocks replace the feed-forward
+  network with a mixture of experts, configured by `:num_experts`.
 
   ## Architectures
 
@@ -371,10 +402,7 @@ defmodule Bumblebee.Text.Qwen3 do
         hidden_state =
           hidden_state
           |> Layers.rms_norm(epsilon: spec.layer_norm_epsilon, name: join(name, "output_norm"))
-          |> Layers.Transformer.gated_ffn(spec.intermediate_size, spec.hidden_size,
-            activation: spec.activation,
-            name: join(name, "ffn")
-          )
+          |> ffn(block.index, spec, name: join(name, "ffn"))
           |> Axon.add(shortcut)
 
         %{
@@ -384,6 +412,33 @@ defmodule Bumblebee.Text.Qwen3 do
         }
       end
     )
+  end
+
+  defp ffn(hidden_state, index, spec, opts) do
+    if expert_block?(spec, index) do
+      Layers.Transformer.mixture_of_experts(
+        hidden_state,
+        spec.expert_intermediate_size,
+        spec.hidden_size,
+        num_experts: spec.num_experts,
+        num_experts_per_token: spec.num_experts_per_token,
+        normalize_top_k: spec.normalize_top_k,
+        activation: spec.activation,
+        kernel_initializer: kernel_initializer(spec),
+        name: opts[:name]
+      )
+    else
+      Layers.Transformer.gated_ffn(hidden_state, spec.intermediate_size, spec.hidden_size,
+        activation: spec.activation,
+        name: opts[:name]
+      )
+    end
+  end
+
+  @doc false
+  def expert_block?(spec, index) do
+    spec.num_experts != nil and index not in spec.dense_block_indices and
+      rem(index + 1, spec.expert_block_step) == 0
   end
 
   defp language_modeling_head(hidden_state, spec, opts) do
@@ -416,7 +471,13 @@ defmodule Bumblebee.Text.Qwen3 do
           intermediate_size: {"intermediate_size", number()},
           activation: {"hidden_act", activation()},
           initializer_scale: {"initializer_range", number()},
-          layer_norm_epsilon: {"rms_norm_eps", number()}
+          layer_norm_epsilon: {"rms_norm_eps", number()},
+          num_experts: {"num_experts", number()},
+          num_experts_per_token: {"num_experts_per_tok", number()},
+          expert_intermediate_size: {"moe_intermediate_size", number()},
+          expert_block_step: {"decoder_sparse_step", number()},
+          dense_block_indices: {"mlp_only_layers", list(number())},
+          normalize_top_k: {"norm_topk_prob", boolean()}
         ) ++
           Shared.rotary_embedding_options_from_transformers(data) ++
           Shared.common_options_from_transformers(data, spec)
@@ -427,7 +488,30 @@ defmodule Bumblebee.Text.Qwen3 do
 
   defimpl Bumblebee.HuggingFace.Transformers.Model do
     def params_mapping(spec) do
-      %{
+      experts =
+        if spec.num_experts do
+          stack = fn projection ->
+            sources =
+              for expert <- 0..(spec.num_experts - 1) do
+                [{"model.layers.{n}.mlp.experts.#{expert}.#{projection}", "weight"}]
+              end
+
+            {sources, &Nx.stack/1}
+          end
+
+          %{
+            "decoder.blocks.{n}.ffn.router" => "model.layers.{n}.mlp.gate",
+            "decoder.blocks.{n}.ffn.experts" => %{
+              "gate_kernel" => stack.("gate_proj"),
+              "intermediate_kernel" => stack.("up_proj"),
+              "output_kernel" => stack.("down_proj")
+            }
+          }
+        else
+          %{}
+        end
+
+      Map.merge(experts, %{
         "embedder.token_embedding" => "model.embed_tokens",
         "decoder.blocks.{n}.self_attention.query" => "model.layers.{n}.self_attn.q_proj",
         "decoder.blocks.{n}.self_attention.key" => "model.layers.{n}.self_attn.k_proj",
@@ -444,7 +528,7 @@ defmodule Bumblebee.Text.Qwen3 do
         "language_modeling_head.output" =>
           if(spec.tie_word_embeddings, do: "model.embed_tokens", else: "lm_head"),
         "sequence_classification_head.output" => "score"
-      }
+      })
     end
   end
 end

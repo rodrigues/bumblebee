@@ -29,6 +29,84 @@ defmodule Bumblebee.Layers do
     end
   end
 
+  @doc false
+  def mixture_of_experts_impl(x, router_logits, gate, intermediate, output, opts) do
+    {batch_size, sequence_length, hidden_size} = Nx.shape(x)
+    num_tokens = batch_size * sequence_length
+    num_experts = Nx.axis_size(gate, 0)
+    k = opts[:num_experts_per_token]
+
+    x = Nx.reshape(x, {num_tokens, hidden_size})
+
+    probabilities =
+      router_logits
+      |> Nx.reshape({num_tokens, num_experts})
+      |> Nx.as_type(:f32)
+      |> Axon.Activations.softmax(axis: -1)
+
+    {weights, experts} = Nx.top_k(probabilities, k: k)
+
+    weights =
+      if opts[:normalize_top_k],
+        do: Nx.divide(weights, Nx.sum(weights, axes: [-1], keep_axes: true)),
+        else: weights
+
+    weights = Nx.as_type(weights, Nx.type(x))
+    activation = activation_fun(opts[:activation])
+
+    # Gathering the chosen experts reads k experts per token, while
+    # computing every expert reads each expert once, so the cheaper one
+    # depends on the number of tokens
+    output =
+      if num_tokens * k <= num_experts do
+        routed_experts(x, weights, experts, gate, intermediate, output, activation)
+      else
+        all_experts(x, weights, experts, gate, intermediate, output, activation)
+      end
+
+    Nx.reshape(output, {batch_size, sequence_length, :auto})
+  end
+
+  defp routed_experts(x, weights, experts, gate, intermediate, output, activation) do
+    {num_tokens, k} = Nx.shape(experts)
+    experts = Nx.reshape(experts, {num_tokens * k})
+    x = x |> Nx.new_axis(1) |> Nx.broadcast({num_tokens, k, Nx.axis_size(x, 1)})
+    x = Nx.reshape(x, {num_tokens * k, :auto})
+
+    project = fn x, kernel -> Nx.dot(x, [1], [0], Nx.take(kernel, experts), [2], [0]) end
+    hidden = Nx.multiply(activation.(project.(x, gate)), project.(x, intermediate))
+
+    hidden
+    |> project.(output)
+    |> Nx.reshape({num_tokens, k, :auto})
+    |> Nx.multiply(Nx.new_axis(weights, -1))
+    |> Nx.sum(axes: [1])
+  end
+
+  defp all_experts(x, weights, experts, gate, intermediate, output, activation) do
+    num_experts = Nx.axis_size(gate, 0)
+
+    # The router weights of every expert, zero for the experts not chosen
+    expert_weights =
+      Nx.equal(Nx.new_axis(experts, -1), Nx.iota({1, 1, num_experts}))
+      |> Nx.multiply(Nx.new_axis(weights, -1))
+      |> Nx.sum(axes: [1])
+
+    project = fn x, kernel -> Nx.dot(x, [1], kernel, [2]) end
+    hidden = Nx.multiply(activation.(project.(x, gate)), project.(x, intermediate))
+
+    hidden
+    |> Nx.transpose(axes: [1, 0, 2])
+    |> Nx.dot([2], [0], output, [2], [0])
+    |> Nx.multiply(expert_weights |> Nx.transpose() |> Nx.new_axis(-1))
+    |> Nx.sum(axes: [0])
+  end
+
+  defp activation_fun(activation) when activation in @unsupported_activations,
+    do: &apply(__MODULE__, activation, [&1, []])
+
+  defp activation_fun(activation), do: &apply(Axon.Activations, activation, [&1])
+
   @doc """
   Implements the GeLU activation approximated with tanh.
 
