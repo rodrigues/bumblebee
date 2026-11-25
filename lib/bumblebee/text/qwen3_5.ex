@@ -945,9 +945,11 @@ defmodule Bumblebee.Text.Qwen3_5 do
 
   defimpl Bumblebee.HuggingFace.Transformers.Model do
     def params_mapping(spec) do
-      # Text-only, multimodal and MLX checkpoints store the language
-      # model under different prefixes. Without a head, the prefix is
-      # inferred on load, which also covers the unprefixed base checkpoint
+      # Text-only, multimodal and MLX checkpoints store the language model
+      # under different prefixes. The loader infers one prefix for every
+      # name in the mapping, but MLX checkpoints keep the head outside the
+      # prefix of the layers, so the causal model lists each prefix, and
+      # the base model, which has no head, relies on the inference
       layer =
         case spec.architecture do
           :base ->
