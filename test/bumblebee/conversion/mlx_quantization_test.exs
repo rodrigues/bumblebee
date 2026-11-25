@@ -9,6 +9,8 @@ defmodule Bumblebee.Conversion.MLXQuantizationTest do
   @backend {EMLX.Backend, device: :gpu}
   @repo_4bit {:hf, "bumblebee-testing/tiny-random-Qwen3ForCausalLM-mlx-4bit"}
   @repo_8bit {:hf, "bumblebee-testing/tiny-random-Qwen3ForCausalLM-mlx-8bit"}
+  @repo_gemma4_4bit {:hf,
+                     "bumblebee-testing/tiny-random-Gemma4ForCausalLM-attention_k_eq_v-true-mlx-4bit"}
 
   defp predict(model, params) do
     inputs = %{"input_ids" => Nx.tensor([[10, 20, 30, 40, 50, 60, 70, 80]], backend: @backend)}
@@ -95,6 +97,22 @@ defmodule Bumblebee.Conversion.MLXQuantizationTest do
         [[0.1601, 0.0822, -0.0808], [0.1610, -0.0205, -0.0057], [0.2381, -0.0044, -0.0262]]
       ]),
       atol: 1.0e-3
+    )
+  end
+
+  # Gemma 4 with keys as values, as in 31B, whose down projections mlx-lm
+  # leaves unquantized, because their input size is not a multiple of the group
+  test "Gemma 4 logits match mlx-lm" do
+    assert {:ok, %{model: model, params: params}} =
+             Bumblebee.load_model(@repo_gemma4_4bit, backend: @backend)
+
+    # Reference values from mlx-lm 0.32.2 in full float32
+    assert_all_close(
+      predict(model, params)[[.., 1..3, 1..3]],
+      Nx.tensor([
+        [[-2.2282, 0.5446, -0.5337], [-1.5066, 2.1809, 1.7046], [1.1130, -1.1758, -0.5274]]
+      ]),
+      atol: 1.0e-4
     )
   end
 
