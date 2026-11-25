@@ -290,12 +290,12 @@ defmodule Bumblebee.Text.KimiLinear do
 
   defp core(inputs, spec) do
     embeddings =
-      Layers.default inputs["input_embeddings"] do
-        Axon.embedding(inputs["input_ids"], spec.vocab_size, spec.hidden_size,
-          kernel_initializer: kernel_initializer(spec),
-          name: "embedder.token_embedding"
-        )
-      end
+      embedder(
+        inputs["input_ids"],
+        inputs["input_embeddings"],
+        spec,
+        name: "embedder"
+      )
 
     decoder_outputs =
       decoder(embeddings, inputs["attention_mask"], inputs["cache"], spec, name: "decoder")
@@ -312,6 +312,17 @@ defmodule Bumblebee.Text.KimiLinear do
       attentions: decoder_outputs.attentions,
       cache: decoder_outputs.cache
     }
+  end
+
+  defp embedder(input_ids, input_embeddings, spec, opts) do
+    name = opts[:name]
+
+    Layers.default input_embeddings do
+      Axon.embedding(input_ids, spec.vocab_size, spec.hidden_size,
+        kernel_initializer: kernel_initializer(spec),
+        name: join(name, "token_embedding")
+      )
+    end
   end
 
   defp decoder(hidden_state, attention_mask, cache, spec, opts) do
