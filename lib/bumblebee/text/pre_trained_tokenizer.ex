@@ -611,8 +611,8 @@ defmodule Bumblebee.Text.PreTrainedTokenizer do
     # Templates read the special tokens as configured, including ones
     # that the tokenizer type does not track, such as the llama BOS token
     defp load_chat_template_tokens(data) do
-      for {"" <> key, value} <- data,
-          String.ends_with?(key, "_token"),
+      for {key, value} <- data,
+          is_binary(key) and String.ends_with?(key, "_token"),
           token = chat_template_token(value),
           into: %{},
           do: {key, token}

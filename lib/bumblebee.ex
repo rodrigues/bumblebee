@@ -1017,8 +1017,7 @@ defmodule Bumblebee do
       ])
 
     unless Code.ensure_loaded?(Otera.ChatTemplate) do
-      raise RuntimeError,
-            "Bumblebee.apply_chat_template/3 requires the :otera dependency," <>
+      raise "Bumblebee.apply_chat_template/3 requires the :otera dependency," <>
               " add {:otera, \"~> 0.2\"} to your dependencies"
     end
 
