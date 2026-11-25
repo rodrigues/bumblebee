@@ -550,31 +550,20 @@ defmodule Bumblebee.Text.Mistral do
 
   defimpl Bumblebee.HuggingFace.Transformers.Model do
     def params_mapping(spec) do
-      # Multimodal checkpoints store the language model under another
-      # prefix. Without a head, the prefix is inferred on load
-      layer =
-        case spec.architecture do
-          :base -> fn name -> "model." <> name end
-          _ -> fn name -> ["model." <> name, "language_model.model." <> name] end
-        end
-
       %{
-        "embedder.token_embedding" => layer.("embed_tokens"),
-        "decoder.blocks.{n}.self_attention.query" => layer.("layers.{n}.self_attn.q_proj"),
-        "decoder.blocks.{n}.self_attention.key" => layer.("layers.{n}.self_attn.k_proj"),
-        "decoder.blocks.{n}.self_attention.value" => layer.("layers.{n}.self_attn.v_proj"),
-        "decoder.blocks.{n}.self_attention.output" => layer.("layers.{n}.self_attn.o_proj"),
-        "decoder.blocks.{n}.self_attention_norm" => layer.("layers.{n}.input_layernorm"),
-        "decoder.blocks.{n}.ffn.gate" => layer.("layers.{n}.mlp.gate_proj"),
-        "decoder.blocks.{n}.ffn.intermediate" => layer.("layers.{n}.mlp.up_proj"),
-        "decoder.blocks.{n}.ffn.output" => layer.("layers.{n}.mlp.down_proj"),
-        "decoder.blocks.{n}.output_norm" => layer.("layers.{n}.post_attention_layernorm"),
-        "output_norm" => layer.("norm"),
+        "embedder.token_embedding" => "model.embed_tokens",
+        "decoder.blocks.{n}.self_attention.query" => "model.layers.{n}.self_attn.q_proj",
+        "decoder.blocks.{n}.self_attention.key" => "model.layers.{n}.self_attn.k_proj",
+        "decoder.blocks.{n}.self_attention.value" => "model.layers.{n}.self_attn.v_proj",
+        "decoder.blocks.{n}.self_attention.output" => "model.layers.{n}.self_attn.o_proj",
+        "decoder.blocks.{n}.self_attention_norm" => "model.layers.{n}.input_layernorm",
+        "decoder.blocks.{n}.ffn.gate" => "model.layers.{n}.mlp.gate_proj",
+        "decoder.blocks.{n}.ffn.intermediate" => "model.layers.{n}.mlp.up_proj",
+        "decoder.blocks.{n}.ffn.output" => "model.layers.{n}.mlp.down_proj",
+        "decoder.blocks.{n}.output_norm" => "model.layers.{n}.post_attention_layernorm",
+        "output_norm" => "model.norm",
         "language_modeling_head.output" =>
-          if(spec.tie_word_embeddings,
-            do: layer.("embed_tokens"),
-            else: ["lm_head", "language_model.lm_head"]
-          ),
+          if(spec.tie_word_embeddings, do: "model.embed_tokens", else: "lm_head"),
         "sequence_classification_head.output" => "score"
       }
     end
