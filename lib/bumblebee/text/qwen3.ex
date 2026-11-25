@@ -172,6 +172,7 @@ defmodule Bumblebee.Text.Qwen3 do
   @behaviour Bumblebee.Text.Generation
 
   import Bumblebee.Utils.Model, only: [join: 2]
+  import Nx.Defn
 
   alias Bumblebee.Layers
 
@@ -415,28 +416,59 @@ defmodule Bumblebee.Text.Qwen3 do
   end
 
   defp ffn(hidden_state, index, spec, opts) do
+    name = opts[:name]
+
     if expert_block?(spec, index) do
+      router_logits =
+        Axon.dense(hidden_state, spec.num_experts,
+          use_bias: false,
+          kernel_initializer: kernel_initializer(spec),
+          name: join(name, "router")
+        )
+
+      {weights, experts} =
+        Axon.layer(&route/2, [router_logits],
+          num_experts_per_token: spec.num_experts_per_token,
+          normalize_top_k: spec.normalize_top_k,
+          op_name: :route
+        )
+        |> Layers.unwrap_tuple(2)
+
       Layers.Transformer.mixture_of_experts(
         hidden_state,
+        weights,
+        experts,
         spec.expert_intermediate_size,
         spec.hidden_size,
         num_experts: spec.num_experts,
-        num_experts_per_token: spec.num_experts_per_token,
-        normalize_top_k: spec.normalize_top_k,
         activation: spec.activation,
         kernel_initializer: kernel_initializer(spec),
-        name: opts[:name]
+        name: name
       )
     else
       Layers.Transformer.gated_ffn(hidden_state, spec.intermediate_size, spec.hidden_size,
         activation: spec.activation,
-        name: opts[:name]
+        name: name
       )
     end
   end
 
-  @doc false
-  def expert_block?(spec, index) do
+  defnp route(router_logits, opts \\ []) do
+    opts = keyword!(opts, [:num_experts_per_token, :normalize_top_k, mode: :inference])
+
+    probabilities = Axon.Activations.softmax(Nx.as_type(router_logits, :f32), axis: -1)
+    {weights, experts} = Nx.top_k(probabilities, k: opts[:num_experts_per_token])
+
+    weights =
+      case opts[:normalize_top_k] do
+        true -> weights / Nx.sum(weights, axes: [-1], keep_axes: true)
+        false -> weights
+      end
+
+    {weights, experts}
+  end
+
+  defp expert_block?(spec, index) do
     spec.num_experts != nil and index not in spec.dense_block_indices and
       rem(index + 1, spec.expert_block_step) == 0
   end

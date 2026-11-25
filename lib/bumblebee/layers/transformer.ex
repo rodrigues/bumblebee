@@ -289,9 +289,10 @@ defmodule Bumblebee.Layers.Transformer do
   @doc """
   Adds a mixture-of-experts feed-forward block to the network.
 
-  A router picks `:num_experts_per_token` of `:num_experts` gated
-  feed-forward networks for each token, and the block returns the sum
-  of their outputs weighted by the router probabilities.
+  Each token goes through the experts chosen by a router, given as
+  `weights` and `experts`, both `{batch_size, sequence_length, k}`.
+  Every expert is a gated feed-forward network, and the block returns
+  the sum of their outputs multiplied by `weights`.
 
   ## Options
 
@@ -299,46 +300,31 @@ defmodule Bumblebee.Layers.Transformer do
 
     * `:num_experts` - the number of experts
 
-    * `:num_experts_per_token` - the number of experts each token is
-      routed to
-
     * `:activation` - the activation used in the gated experts.
       Defaults to `:silu`
-
-    * `:normalize_top_k` - whether to normalize the probabilities of
-      the chosen experts to sum to 1. Defaults to `true`
 
     * `:kernel_initializer` - initializer for kernel weights. Defaults
       to `:glorot_uniform`
 
   """
-  def mixture_of_experts(x, intermediate_size, output_size, opts) do
+  def mixture_of_experts(x, weights, experts, intermediate_size, output_size, opts) do
     opts =
       Keyword.validate!(opts, [
         :name,
         :num_experts,
-        :num_experts_per_token,
         activation: :silu,
-        normalize_top_k: true,
         kernel_initializer: :glorot_uniform
       ])
 
     name = opts[:name]
     num_experts = opts[:num_experts]
 
-    router_logits =
-      Axon.dense(x, num_experts,
-        use_bias: false,
-        kernel_initializer: opts[:kernel_initializer],
-        name: join(name, "router")
-      )
-
     kernel = fn param_name, shape_fun ->
       Axon.param(param_name, shape_fun, initializer: opts[:kernel_initializer])
     end
 
     # Expert kernels are {num_experts, out, in}, as in the checkpoints
-    input_kernel_shape = fn input_shape, _ ->
+    input_kernel_shape = fn input_shape, _, _ ->
       {num_experts, intermediate_size, elem(input_shape, tuple_size(input_shape) - 1)}
     end
 
@@ -346,16 +332,11 @@ defmodule Bumblebee.Layers.Transformer do
     intermediate = kernel.("intermediate_kernel", input_kernel_shape)
 
     output =
-      kernel.("output_kernel", fn _, _ -> {num_experts, output_size, intermediate_size} end)
+      kernel.("output_kernel", fn _, _, _ -> {num_experts, output_size, intermediate_size} end)
 
-    Axon.layer(
-      &Layers.mixture_of_experts_impl/6,
-      [x, router_logits, gate, intermediate, output],
+    Layers.mixture_of_experts(x, weights, experts, gate, intermediate, output,
       name: join(name, "experts"),
-      num_experts_per_token: opts[:num_experts_per_token],
-      activation: opts[:activation],
-      normalize_top_k: opts[:normalize_top_k],
-      op_name: :mixture_of_experts
+      activation: opts[:activation]
     )
   end
 

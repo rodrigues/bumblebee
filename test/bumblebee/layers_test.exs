@@ -114,4 +114,63 @@ defmodule Bumblebee.LayersTest do
       )
     end
   end
+
+  describe "mixture of experts" do
+    # Gathering the chosen experts is used for up to 2 tokens, and computing every expert for more
+    for num_tokens <- [2, 5] do
+      test "sums the outputs of the chosen experts multiplied by their weights, with #{num_tokens} tokens" do
+        num_tokens = unquote(num_tokens)
+
+        # 4 experts, 2 per token, hidden size 4 and intermediate size 3
+        key = Nx.Random.key(0)
+        {x, key} = Nx.Random.normal(key, shape: {1, num_tokens, 4})
+        {weights, key} = Nx.Random.uniform(key, shape: {1, num_tokens, 2})
+        {gate, key} = Nx.Random.normal(key, shape: {4, 3, 4})
+        {intermediate, key} = Nx.Random.normal(key, shape: {4, 3, 4})
+        {output, _key} = Nx.Random.normal(key, shape: {4, 4, 3})
+        experts = Nx.tensor([[[1, 3], [0, 2], [3, 0], [2, 1], [0, 3]]])[[.., 0..(num_tokens - 1)]]
+
+        model =
+          Layers.mixture_of_experts(
+            Axon.input("x"),
+            Axon.input("weights"),
+            Axon.input("experts"),
+            Axon.input("gate"),
+            Axon.input("intermediate"),
+            Axon.input("output")
+          )
+
+        inputs = %{
+          "x" => x,
+          "weights" => weights,
+          "experts" => experts,
+          "gate" => gate,
+          "intermediate" => intermediate,
+          "output" => output
+        }
+
+        expected =
+          Enum.map(0..(num_tokens - 1), fn token ->
+            input = x[[0, token]]
+
+            Enum.map(0..1, fn slot ->
+              expert = Nx.to_number(experts[[0, token, slot]])
+
+              hidden =
+                Nx.multiply(
+                  Axon.Activations.silu(Nx.dot(gate[expert], input)),
+                  Nx.dot(intermediate[expert], input)
+                )
+
+              Nx.multiply(Nx.dot(output[expert], hidden), weights[[0, token, slot]])
+            end)
+            |> Enum.reduce(&Nx.add/2)
+          end)
+          |> Nx.stack()
+          |> Nx.new_axis(0)
+
+        assert_all_close(Axon.predict(model, Axon.ModelState.empty(), inputs), expected)
+      end
+    end
+  end
 end

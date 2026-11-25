@@ -29,29 +29,55 @@ defmodule Bumblebee.Layers do
     end
   end
 
-  @doc false
-  def mixture_of_experts_impl(x, router_logits, gate, intermediate, output, opts) do
+  @doc """
+  Adds a mixture-of-experts layer to the network.
+
+  Each token goes through the experts listed in `experts`, and the
+  layer returns the sum of their outputs multiplied by `weights`.
+  Both are `{batch_size, sequence_length, k}`, as chosen by a router.
+
+  Each expert is a gated feed-forward network, with kernels stacked
+  along the first axis: `gate` and `intermediate` have the shape
+  `{num_experts, intermediate_size, hidden_size}`, and `output` has
+  the shape `{num_experts, hidden_size, intermediate_size}`.
+
+  ## Options
+
+    * `:name` - layer name
+
+    * `:activation` - the activation used in the gated experts.
+      Defaults to `:silu`
+
+  """
+  def mixture_of_experts(x, weights, experts, gate, intermediate, output, opts \\ []) do
+    opts = Keyword.validate!(opts, [:name, activation: :silu])
+
+    Axon.layer(
+      &mixture_of_experts_impl/7,
+      [x, weights, experts, gate, intermediate, output],
+      name: opts[:name],
+      activation: opts[:activation],
+      op_name: :mixture_of_experts
+    )
+  end
+
+  deftransformp mixture_of_experts_impl(
+                  x,
+                  weights,
+                  experts,
+                  gate,
+                  intermediate,
+                  output,
+                  opts \\ []
+                ) do
     {batch_size, sequence_length, hidden_size} = Nx.shape(x)
     num_tokens = batch_size * sequence_length
     num_experts = Nx.axis_size(gate, 0)
-    k = opts[:num_experts_per_token]
+    k = Nx.axis_size(experts, -1)
 
     x = Nx.reshape(x, {num_tokens, hidden_size})
-
-    probabilities =
-      router_logits
-      |> Nx.reshape({num_tokens, num_experts})
-      |> Nx.as_type(:f32)
-      |> Axon.Activations.softmax(axis: -1)
-
-    {weights, experts} = Nx.top_k(probabilities, k: k)
-
-    weights =
-      if opts[:normalize_top_k],
-        do: Nx.divide(weights, Nx.sum(weights, axes: [-1], keep_axes: true)),
-        else: weights
-
-    weights = Nx.as_type(weights, Nx.type(x))
+    weights = weights |> Nx.reshape({num_tokens, k}) |> Nx.as_type(Nx.type(x))
+    experts = Nx.reshape(experts, {num_tokens, k})
     activation = activation_fun(opts[:activation])
 
     # Gathering the chosen experts reads k experts per token, while
