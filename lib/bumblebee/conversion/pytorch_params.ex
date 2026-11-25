@@ -132,12 +132,26 @@ defmodule Bumblebee.Conversion.PyTorchParams do
             {sources, builder_fun, keep_quantized?} =
               case params_source do
                 %{} = param_builders ->
-                  if param_builder = param_builders[param.name] do
-                    {sources, builder_fun} = param_builder
-                    {sources, builder_fun, false}
-                  else
-                    raise "no matching mapping found for parameter #{inspect(param.name)} in #{inspect(param_builders)}"
-                  end
+                  {sources, builder_fun} =
+                    case param_builders[param.name] do
+                      nil ->
+                        raise "no matching mapping found for parameter #{inspect(param.name)} in #{inspect(param_builders)}"
+
+                      # Alternative builders, for checkpoints that store the
+                      # parameter differently, the first one found is used
+                      [_ | _] = param_builders ->
+                        Enum.find(param_builders, hd(param_builders), fn {sources, _} ->
+                          Enum.all?(sources, &source_found?(pytorch_state, &1))
+                        end)
+
+                      param_builder ->
+                        param_builder
+                    end
+
+                  # Expert kernels are multiplied by gathering quantized weights
+                  keep_quantized? = layer.op_name == :mixture_of_experts
+
+                  {sources, builder_fun, keep_quantized?}
 
                 source_layer_name
                 when is_binary(source_layer_name) or
@@ -533,6 +547,14 @@ defmodule Bumblebee.Conversion.PyTorchParams do
 
   defp expr_shape(expr) do
     Utils.Nx.map(expr, &Nx.shape/1)
+  end
+
+  defp source_found?(pytorch_state, source) do
+    source
+    |> List.wrap()
+    |> Enum.any?(fn {layer_name, param_name} ->
+      lookup_param(pytorch_state, layer_name, param_name) != nil
+    end)
   end
 
   defp ensure_type(param_expr, value) do

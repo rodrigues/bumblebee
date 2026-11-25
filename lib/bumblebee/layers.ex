@@ -82,9 +82,10 @@ defmodule Bumblebee.Layers do
 
     # Gathering the chosen experts reads k experts per token, while
     # computing every expert reads each expert once, so the cheaper one
-    # depends on the number of tokens
+    # depends on the number of tokens. Quantized kernels are always
+    # gathered, which backends can do without unpacking them
     output =
-      if num_tokens * k <= num_experts do
+      if num_tokens * k <= num_experts or Nx.Type.integer?(Nx.type(gate)) do
         routed_experts(x, weights, experts, gate, intermediate, output, activation)
       else
         all_experts(x, weights, experts, gate, intermediate, output, activation)

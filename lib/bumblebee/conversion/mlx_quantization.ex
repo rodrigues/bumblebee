@@ -61,13 +61,17 @@ defmodule Bumblebee.Conversion.MLXQuantization do
       {biases, state} = Map.pop!(state, prefix <> ".biases")
 
       %{"bits" => bits, "group_size" => group_size} = layer_quantization(quantization, prefix)
-      {out_features, num_groups} = lazy_shape(scales)
+
+      # Groups run along the last axis, and leading axes, such as stacked experts, are kept
+      scales_shape = lazy_shape(scales)
+      last_axis = tuple_size(scales_shape) - 1
+      shape = put_elem(scales_shape, last_axis, elem(scales_shape, last_axis) * group_size)
 
       quantized = %QuantizedTensor{
         weight: weight,
         scales: scales,
         biases: biases,
-        shape: {out_features, num_groups * group_size},
+        shape: shape,
         bits: bits,
         group_size: group_size
       }

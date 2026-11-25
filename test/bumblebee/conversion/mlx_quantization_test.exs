@@ -9,6 +9,7 @@ defmodule Bumblebee.Conversion.MLXQuantizationTest do
   @backend {EMLX.Backend, device: :gpu}
   @repo_4bit {:hf, "bumblebee-testing/tiny-random-Qwen3ForCausalLM-mlx-4bit"}
   @repo_8bit {:hf, "bumblebee-testing/tiny-random-Qwen3ForCausalLM-mlx-8bit"}
+  @repo_experts {:hf, "bumblebee-testing/tiny-random-Qwen3MoeForCausalLM-mlx-4bit"}
 
   defp predict(model, params) do
     inputs = %{"input_ids" => Nx.tensor([[10, 20, 30, 40, 50, 60, 70, 80]], backend: @backend)}
@@ -93,6 +94,36 @@ defmodule Bumblebee.Conversion.MLXQuantizationTest do
       predict(model, params)[[.., 1..3, 1..3]],
       Nx.tensor([
         [[0.1601, 0.0822, -0.0808], [0.1610, -0.0205, -0.0057], [0.2381, -0.0044, -0.0262]]
+      ]),
+      atol: 1.0e-3
+    )
+  end
+
+  test "keeps stacked expert kernels quantized" do
+    assert {:ok, %{params: params}} = Bumblebee.load_model(@repo_experts, backend: @backend)
+
+    experts = params.data["decoder.blocks.1.ffn.experts"]
+
+    for {name, shape} <- [
+          {"gate_kernel", {8, 128, 64}},
+          {"intermediate_kernel", {8, 128, 64}},
+          {"output_kernel", {8, 64, 128}}
+        ] do
+      assert EMLX.Quantization.quantized?(experts[name])
+      assert Nx.shape(experts[name]) == shape
+      assert Nx.type(experts[name]) == {:s, 4}
+    end
+  end
+
+  test "mixture-of-experts logits match mlx-lm" do
+    assert {:ok, %{model: model, params: params}} =
+             Bumblebee.load_model(@repo_experts, backend: @backend)
+
+    # Reference values from mlx-lm 0.32.2 in full float32
+    assert_all_close(
+      predict(model, params)[[.., 1..3, 1..3]],
+      Nx.tensor([
+        [[-0.4258, 0.9569, -4.6432], [1.0224, 1.2381, -5.1027], [3.9145, 0.7524, 1.1975]]
       ]),
       atol: 1.0e-3
     )
