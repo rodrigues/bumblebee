@@ -177,20 +177,7 @@ defmodule Bumblebee.Text.Qwen3_5 do
 
   @impl true
   def config(spec, opts) do
-    spec = Shared.put_config_attrs(spec, opts)
-
-    layer_types =
-      spec.layer_types ||
-        for index <- 0..(spec.num_blocks - 1) do
-          if rem(index + 1, 4) == 0, do: :full_attention, else: :linear_attention
-        end
-
-    if length(layer_types) != spec.num_blocks do
-      raise ArgumentError,
-            "expected :layer_types to have #{spec.num_blocks} entries, got: #{length(layer_types)}"
-    end
-
-    %{spec | layer_types: layer_types}
+    Shared.put_config_attrs(spec, opts)
   end
 
   @impl true
@@ -231,7 +218,7 @@ defmodule Bumblebee.Text.Qwen3_5 do
     blocks =
       cache.blocks
       |> Tuple.to_list()
-      |> Enum.zip_with(spec.layer_types, fn
+      |> Enum.zip_with(layer_types(spec), fn
         block, :full_attention -> block
         block, :linear_attention -> %{block | self_attention: linear_attention}
       end)
@@ -278,12 +265,12 @@ defmodule Bumblebee.Text.Qwen3_5 do
 
   defp core(inputs, spec) do
     embeddings =
-      Layers.default inputs["input_embeddings"] do
-        Axon.embedding(inputs["input_ids"], spec.vocab_size, spec.hidden_size,
-          kernel_initializer: kernel_initializer(spec),
-          name: "embedder.token_embedding"
-        )
-      end
+      embedder(
+        inputs["input_ids"],
+        inputs["input_embeddings"],
+        spec,
+        name: "embedder"
+      )
 
     position_ids =
       Layers.default inputs["position_ids"] do
@@ -310,8 +297,20 @@ defmodule Bumblebee.Text.Qwen3_5 do
     }
   end
 
+  defp embedder(input_ids, input_embeddings, spec, opts) do
+    name = opts[:name]
+
+    Layers.default input_embeddings do
+      Axon.embedding(input_ids, spec.vocab_size, spec.hidden_size,
+        kernel_initializer: kernel_initializer(spec),
+        name: join(name, "token_embedding")
+      )
+    end
+  end
+
   defp decoder(hidden_state, position_ids, attention_mask, cache, spec, opts) do
     name = opts[:name]
+    layer_types = layer_types(spec)
 
     Layers.Transformer.blocks(
       hidden_state,
@@ -329,7 +328,7 @@ defmodule Bumblebee.Text.Qwen3_5 do
         normalized = rms_norm(hidden_state, spec, name: join(name, "self_attention_norm"))
 
         {hidden_state, attention, self_attention_cache} =
-          case Enum.fetch!(spec.layer_types, block.index) do
+          case Enum.at(layer_types, block.index) do
             :full_attention ->
               gated_attention(normalized, position_ids, block, spec,
                 name: join(name, "self_attention")
@@ -838,12 +837,12 @@ defmodule Bumblebee.Text.Qwen3_5 do
     {l2_normalize(query) / Nx.sqrt(Nx.axis_size(query, -1)), l2_normalize(key)}
   end
 
-  defnp delta_step(q, k, v, b, d, state) do
-    state = state * (d |> Nx.exp() |> Nx.new_axis(-1) |> Nx.new_axis(-1))
-    memory = Nx.sum(state * Nx.new_axis(k, -1), axes: [2])
-    delta = (v - memory) * Nx.new_axis(b, -1)
-    state = state + Nx.new_axis(k, -1) * Nx.new_axis(delta, 2)
-    {Nx.sum(state * Nx.new_axis(q, -1), axes: [2]), state}
+  defnp delta_step(query, key, value, beta, decay, state) do
+    state = state * (decay |> Nx.exp() |> Nx.new_axis(-1) |> Nx.new_axis(-1))
+    memory = Nx.sum(state * Nx.new_axis(key, -1), axes: [2])
+    delta = (value - memory) * Nx.new_axis(beta, -1)
+    state = state + Nx.new_axis(key, -1) * Nx.new_axis(delta, 2)
+    {Nx.sum(state * Nx.new_axis(query, -1), axes: [2]), state}
   end
 
   defnp l2_normalize(x) do
@@ -879,6 +878,13 @@ defmodule Bumblebee.Text.Qwen3_5 do
       kernel_initializer: kernel_initializer(spec),
       name: join(name, "output")
     )
+  end
+
+  defp layer_types(spec) do
+    spec.layer_types ||
+      for index <- 0..(spec.num_blocks - 1) do
+        if rem(index + 1, 4) == 0, do: :full_attention, else: :linear_attention
+      end
   end
 
   defp linear_attention_conv_size(spec) do
