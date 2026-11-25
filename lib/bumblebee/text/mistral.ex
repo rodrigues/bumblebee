@@ -164,6 +164,7 @@ defmodule Bumblebee.Text.Mistral do
   @behaviour Bumblebee.Text.Generation
 
   import Bumblebee.Utils.Model, only: [join: 2]
+  import Nx.Defn
 
   alias Bumblebee.Layers
 
@@ -476,10 +477,13 @@ defmodule Bumblebee.Text.Mistral do
     {attention_output, attention_weights, attention_cache}
   end
 
-  defp scale_query(query, position_ids, opts) do
-    step = position_ids |> Nx.as_type(Nx.type(query)) |> Nx.divide(opts[:positions]) |> Nx.floor()
-    scale = step |> Nx.add(1) |> Nx.log() |> Nx.multiply(opts[:beta]) |> Nx.add(1)
-    Nx.multiply(query, scale |> Nx.new_axis(-1) |> Nx.new_axis(-1))
+  defnp scale_query(query, position_ids, opts \\ []) do
+    opts = keyword!(opts, [:beta, :positions, mode: :inference])
+
+    steps = Nx.floor(Nx.as_type(position_ids, Nx.type(query)) / opts[:positions])
+    scale = Nx.log(steps + 1) * opts[:beta] + 1
+
+    query * (scale |> Nx.new_axis(-1) |> Nx.new_axis(-1))
   end
 
   defp attention_window_size(spec) do
