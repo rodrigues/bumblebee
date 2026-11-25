@@ -185,6 +185,8 @@ defmodule Bumblebee do
     "MistralModel" => {Bumblebee.Text.Mistral, :base},
     "MistralForCausalLM" => {Bumblebee.Text.Mistral, :for_causal_language_modeling},
     "MistralForSequenceClassification" => {Bumblebee.Text.Mistral, :for_sequence_classification},
+    "Ministral3ForCausalLM" => {Bumblebee.Text.Mistral, :for_causal_language_modeling},
+    "Mistral3ForConditionalGeneration" => {Bumblebee.Text.Mistral, :for_causal_language_modeling},
     "ModernBertModel" => {Bumblebee.Text.ModernBert, :base},
     "ModernBertForMaskedLM" => {Bumblebee.Text.ModernBert, :for_masked_language_modeling},
     "ModernBertForSequenceClassification" =>
@@ -294,6 +296,8 @@ defmodule Bumblebee do
     "layoutlm" => :layout_lm,
     "llama" => :llama,
     "mistral" => :llama,
+    "mistral3" => :llama,
+    "ministral3" => :llama,
     "mbart" => :mbart,
     "modernbert" => :modernbert,
     "modernbert-decoder" => :modernbert,

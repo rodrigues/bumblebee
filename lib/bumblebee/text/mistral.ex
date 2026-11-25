@@ -43,6 +43,13 @@ defmodule Bumblebee.Text.Mistral do
         Attention
         """
       ],
+      attention_head_size: [
+        default: nil,
+        doc: """
+        the size of the key, value and query projections per attention head.
+        Defaults to `hidden_size` divided by `num_attention_heads`
+        """
+      ],
       attention_window_size: [
         default: 4096,
         doc:
@@ -64,6 +71,22 @@ defmodule Bumblebee.Text.Mistral do
       rotary_embedding_base: [
         default: 10_000,
         doc: "base for computing rotary embedding frequency"
+      ],
+      query_scaling_beta: [
+        default: nil,
+        doc: """
+        when set, queries are multiplied by `1 + beta * log(1 + floor(position / positions))`,
+        with `positions` given by `:query_scaling_positions`, which grows the attention scale
+        for positions past the original context length
+        """
+      ],
+      query_scaling_positions: [
+        default: 16384,
+        doc: "the number of positions per step of the query scaling"
+      ],
+      tie_word_embeddings: [
+        default: false,
+        doc: "whether to tie input and output embedding weights"
       ]
     ] ++
       Shared.common_options([:rotary_embedding_scaling_strategy, :num_labels, :id_to_label]) ++
@@ -71,6 +94,10 @@ defmodule Bumblebee.Text.Mistral do
 
   @moduledoc """
   Mistral model family.
+
+  This module also covers Ministral 3, whose text model is the Mistral
+  decoder with queries scaled past the original context length. Ministral 3
+  checkpoints are multimodal, and only their language model is loaded.
 
   ## Architectures
 
@@ -166,6 +193,7 @@ defmodule Bumblebee.Text.Mistral do
   def init_cache(spec, batch_size, max_length, _inputs) do
     Layers.Decoder.init_cache(batch_size, max_length,
       hidden_size: spec.hidden_size,
+      attention_head_size: spec.attention_head_size,
       decoder_num_attention_heads: spec.num_attention_heads,
       decoder_num_key_value_heads: spec.num_key_value_heads,
       decoder_num_blocks: spec.num_blocks
@@ -327,33 +355,34 @@ defmodule Bumblebee.Text.Mistral do
 
         shortcut = hidden_state
 
-        {hidden_state, attention, self_attention_cache} =
-          hidden_state
-          |> Layers.rms_norm(
+        normalized =
+          Layers.rms_norm(hidden_state,
             epsilon: spec.layer_norm_epsilon,
             name: join(name, "self_attention_norm")
           )
-          |> Layers.Transformer.self_attention(block,
-            num_heads: spec.num_attention_heads,
-            num_key_value_heads: spec.num_key_value_heads,
-            hidden_size: spec.hidden_size,
-            causal: true,
-            attention_window_size:
-              spec.attention_window_size &&
-                {spec.attention_window_size - 1, spec.attention_window_size - 1},
-            rotary_embedding: [
-              position_ids: position_ids,
-              max_positions: spec.max_positions,
-              base: spec.rotary_embedding_base,
-              scaling_strategy: spec.rotary_embedding_scaling_strategy
-            ],
-            query_use_bias: false,
-            key_use_bias: false,
-            value_use_bias: false,
-            output_use_bias: false,
-            kernel_initializer: kernel_initializer(spec),
-            name: join(name, "self_attention")
-          )
+
+        {hidden_state, attention, self_attention_cache} =
+          if spec.query_scaling_beta do
+            scaled_query_attention(normalized, position_ids, block, spec,
+              name: join(name, "self_attention")
+            )
+          else
+            Layers.Transformer.self_attention(normalized, block,
+              num_heads: spec.num_attention_heads,
+              num_key_value_heads: spec.num_key_value_heads,
+              hidden_size: spec.hidden_size,
+              attention_head_size: spec.attention_head_size,
+              causal: true,
+              attention_window_size: attention_window_size(spec),
+              rotary_embedding: rotary_embedding_opts(position_ids, spec),
+              query_use_bias: false,
+              key_use_bias: false,
+              value_use_bias: false,
+              output_use_bias: false,
+              kernel_initializer: kernel_initializer(spec),
+              name: join(name, "self_attention")
+            )
+          end
 
         hidden_state = Axon.add(hidden_state, shortcut)
 
@@ -377,10 +406,99 @@ defmodule Bumblebee.Text.Mistral do
     )
   end
 
+  # As in Ministral 3, the queries are scaled by a factor that grows with
+  # the position, applied after the rotary embedding
+  defp scaled_query_attention(hidden_state, position_ids, block, spec, opts) do
+    name = opts[:name]
+    head_size = spec.attention_head_size || div(spec.hidden_size, spec.num_attention_heads)
+
+    project = fn num_heads, suffix ->
+      Layers.Transformer.project_heads(hidden_state, num_heads, head_size,
+        use_bias: false,
+        kernel_initializer: kernel_initializer(spec),
+        name: join(name, suffix)
+      )
+    end
+
+    query = project.(spec.num_attention_heads, "query")
+    key = project.(spec.num_key_value_heads, "key")
+    value = project.(spec.num_key_value_heads, "value")
+
+    {query, key} =
+      Layers.Transformer.rotary_embedding(
+        query,
+        key,
+        block.attention_mask,
+        head_size,
+        rotary_embedding_opts(position_ids, spec),
+        name: join(name, "rotary_embedding")
+      )
+
+    query =
+      Axon.layer(&scale_query/3, [query, position_ids],
+        beta: spec.query_scaling_beta,
+        positions: spec.query_scaling_positions,
+        op_name: :scale_query
+      )
+
+    {key, value, attention_cache} =
+      Layers.Decoder.cached_attention_key_values(
+        key,
+        value,
+        block.self_attention_cache,
+        block.offset
+      )
+
+    num_key_value_groups = div(spec.num_attention_heads, spec.num_key_value_heads)
+    key = Layers.Transformer.repeat_heads(key, num_key_value_groups)
+    value = Layers.Transformer.repeat_heads(value, num_key_value_groups)
+
+    {attention_output, attention_weights} =
+      Layers.attention(
+        query,
+        key,
+        value,
+        block.attention_mask,
+        block.attention_head_mask,
+        Layers.none(),
+        block.offset,
+        causal: true,
+        window_size: attention_window_size(spec)
+      )
+
+    attention_output =
+      Layers.Transformer.output_projection(attention_output, spec.hidden_size,
+        use_bias: false,
+        kernel_initializer: kernel_initializer(spec),
+        name: join(name, "output")
+      )
+
+    {attention_output, attention_weights, attention_cache}
+  end
+
+  defp scale_query(query, position_ids, opts) do
+    step = position_ids |> Nx.as_type(Nx.type(query)) |> Nx.divide(opts[:positions]) |> Nx.floor()
+    scale = step |> Nx.add(1) |> Nx.log() |> Nx.multiply(opts[:beta]) |> Nx.add(1)
+    Nx.multiply(query, scale |> Nx.new_axis(-1) |> Nx.new_axis(-1))
+  end
+
+  defp attention_window_size(spec) do
+    spec.attention_window_size &&
+      {spec.attention_window_size - 1, spec.attention_window_size - 1}
+  end
+
+  defp rotary_embedding_opts(position_ids, spec) do
+    [
+      position_ids: position_ids,
+      max_positions: spec.max_positions,
+      base: spec.rotary_embedding_base,
+      scaling_strategy: spec.rotary_embedding_scaling_strategy
+    ]
+  end
+
   defp language_modeling_head(hidden_state, spec, opts) do
     name = opts[:name]
 
-    # TODO: Tie lm-head to word embedding as a spec option
     Layers.dense_transposed(hidden_state, spec.vocab_size,
       kernel_initializer: kernel_initializer(spec),
       name: join(name, "output")
@@ -392,6 +510,14 @@ defmodule Bumblebee.Text.Mistral do
   end
 
   defimpl Bumblebee.HuggingFace.Transformers.Config do
+    def load(spec, %{"model_type" => "mistral3", "text_config" => %{} = text_config} = data) do
+      # The multimodal config controls whether the output head is tied.
+      text_config =
+        Map.put(text_config, "tie_word_embeddings", Map.get(data, "tie_word_embeddings", true))
+
+      load(spec, text_config)
+    end
+
     def load(spec, data) do
       import Shared.Converters
 
@@ -403,12 +529,18 @@ defmodule Bumblebee.Text.Mistral do
           num_blocks: {"num_hidden_layers", number()},
           num_attention_heads: {"num_attention_heads", number()},
           num_key_value_heads: {"num_key_value_heads", number()},
+          attention_head_size: {"head_dim", optional(number())},
           attention_window_size: {"sliding_window", optional(number())},
           intermediate_size: {"intermediate_size", number()},
           activation: {"hidden_act", activation()},
           initializer_scale: {"initializer_range", number()},
-          layer_norm_epsilon: {"rms_norm_eps", number()}
+          layer_norm_epsilon: {"rms_norm_eps", number()},
+          tie_word_embeddings: {"tie_word_embeddings", boolean()}
         ) ++
+          convert!(data["rope_parameters"] || %{},
+            query_scaling_beta: {"llama_4_scaling_beta", number()},
+            query_scaling_positions: {"original_max_position_embeddings", number()}
+          ) ++
           Shared.rotary_embedding_options_from_transformers(data) ++
           Shared.common_options_from_transformers(data, spec)
 
@@ -417,20 +549,32 @@ defmodule Bumblebee.Text.Mistral do
   end
 
   defimpl Bumblebee.HuggingFace.Transformers.Model do
-    def params_mapping(_spec) do
+    def params_mapping(spec) do
+      # Multimodal checkpoints store the language model under another
+      # prefix. Without a head, the prefix is inferred on load
+      layer =
+        case spec.architecture do
+          :base -> fn name -> "model." <> name end
+          _ -> fn name -> ["model." <> name, "language_model.model." <> name] end
+        end
+
       %{
-        "embedder.token_embedding" => "model.embed_tokens",
-        "decoder.blocks.{n}.self_attention.query" => "model.layers.{n}.self_attn.q_proj",
-        "decoder.blocks.{n}.self_attention.key" => "model.layers.{n}.self_attn.k_proj",
-        "decoder.blocks.{n}.self_attention.value" => "model.layers.{n}.self_attn.v_proj",
-        "decoder.blocks.{n}.self_attention.output" => "model.layers.{n}.self_attn.o_proj",
-        "decoder.blocks.{n}.self_attention_norm" => "model.layers.{n}.input_layernorm",
-        "decoder.blocks.{n}.ffn.gate" => "model.layers.{n}.mlp.gate_proj",
-        "decoder.blocks.{n}.ffn.intermediate" => "model.layers.{n}.mlp.up_proj",
-        "decoder.blocks.{n}.ffn.output" => "model.layers.{n}.mlp.down_proj",
-        "decoder.blocks.{n}.output_norm" => "model.layers.{n}.post_attention_layernorm",
-        "output_norm" => "model.norm",
-        "language_modeling_head.output" => "lm_head",
+        "embedder.token_embedding" => layer.("embed_tokens"),
+        "decoder.blocks.{n}.self_attention.query" => layer.("layers.{n}.self_attn.q_proj"),
+        "decoder.blocks.{n}.self_attention.key" => layer.("layers.{n}.self_attn.k_proj"),
+        "decoder.blocks.{n}.self_attention.value" => layer.("layers.{n}.self_attn.v_proj"),
+        "decoder.blocks.{n}.self_attention.output" => layer.("layers.{n}.self_attn.o_proj"),
+        "decoder.blocks.{n}.self_attention_norm" => layer.("layers.{n}.input_layernorm"),
+        "decoder.blocks.{n}.ffn.gate" => layer.("layers.{n}.mlp.gate_proj"),
+        "decoder.blocks.{n}.ffn.intermediate" => layer.("layers.{n}.mlp.up_proj"),
+        "decoder.blocks.{n}.ffn.output" => layer.("layers.{n}.mlp.down_proj"),
+        "decoder.blocks.{n}.output_norm" => layer.("layers.{n}.post_attention_layernorm"),
+        "output_norm" => layer.("norm"),
+        "language_modeling_head.output" =>
+          if(spec.tie_word_embeddings,
+            do: layer.("embed_tokens"),
+            else: ["lm_head", "language_model.lm_head"]
+          ),
         "sequence_classification_head.output" => "score"
       }
     end
