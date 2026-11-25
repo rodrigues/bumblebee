@@ -1,0 +1,798 @@
+defmodule Bumblebee.Text.Llama4 do
+  alias Bumblebee.Shared
+
+  options =
+    [
+      vocab_size: [
+        default: 202_048,
+        doc: """
+        the vocabulary size of the token embedding. This corresponds to the number of distinct
+        tokens that can be represented in model input and output
+        """
+      ],
+      max_positions: [
+        default: 131_072,
+        doc: """
+        the vocabulary size of the position embedding. This corresponds to the maximum sequence
+        length that this model can process. Typically this is set to a large value just in case,
+        such as 512, 1024 or 2048
+        """
+      ],
+      hidden_size: [
+        default: 5120,
+        doc: "the dimensionality of hidden layers"
+      ],
+      intermediate_size: [
+        default: 8192,
+        doc: "the dimensionality of intermediate layers in the experts and the shared expert"
+      ],
+      dense_intermediate_size: [
+        default: 16384,
+        doc: "the dimensionality of intermediate layers in blocks without experts"
+      ],
+      attention_head_size: [
+        default: 128,
+        doc: "the size of the key, value, and query projection per attention head"
+      ],
+      num_blocks: [
+        default: 48,
+        doc: "the number of Transformer blocks in the model"
+      ],
+      num_attention_heads: [
+        default: 40,
+        doc: "the number of attention heads for each attention layer in the model"
+      ],
+      num_key_value_heads: [
+        default: 8,
+        doc: "the number of key value heads for each attention layer in the model"
+      ],
+      layer_types: [
+        default: nil,
+        doc: """
+        the type of attention in each block, either `:chunked_attention` or `:full_attention`.
+        Chunked attention blocks attend within chunks of `:attention_chunk_size` tokens and
+        use rotary embedding. Full attention blocks attend to the whole sequence, use no
+        position embedding and scale queries by position (see `:attention_temperature_tuning`).
+        Defaults to full attention in every fourth block
+        """
+      ],
+      attention_chunk_size: [
+        default: 8192,
+        doc: "the number of tokens in each chunk of chunked attention blocks"
+      ],
+      use_query_key_norm: [
+        default: true,
+        doc:
+          "whether to normalize queries and keys to unit root mean square in chunked attention blocks"
+      ],
+      attention_temperature_tuning: [
+        default: true,
+        doc: """
+        whether full attention blocks scale queries by
+        `1 + scale * log(1 + floor((position + 1) / positions))`, with `scale` and
+        `positions` given by `:attention_temperature_scale` and `:attention_temperature_positions`
+        """
+      ],
+      attention_temperature_scale: [
+        default: 0.1,
+        doc: "the scale of query temperature tuning"
+      ],
+      attention_temperature_positions: [
+        default: 8192,
+        doc: "the number of positions after which query temperature tuning grows by one step"
+      ],
+      num_experts: [
+        default: 16,
+        doc: "the number of experts in each block with experts"
+      ],
+      num_experts_per_token: [
+        default: 1,
+        doc: "the number of experts each token is routed to"
+      ],
+      expert_block_step: [
+        default: 1,
+        doc: "every this many blocks has experts, counting from the last of each step"
+      ],
+      expert_block_indices: [
+        default: nil,
+        doc: "the indices of blocks with experts. Defaults to every `:expert_block_step` block"
+      ],
+      activation: [
+        default: :silu,
+        doc: "the activation function"
+      ],
+      rotary_embedding_base: [
+        default: 500_000,
+        doc: "base for computing rotary embedding frequency"
+      ],
+      layer_norm_epsilon: [
+        default: 1.0e-5,
+        doc: "the epsilon used by RMS normalization layers"
+      ],
+      initializer_scale: [
+        default: 0.02,
+        doc:
+          "the standard deviation of the normal initializer used for initializing kernel parameters"
+      ],
+      tie_word_embeddings: [
+        default: false,
+        doc: "whether to tie input and output embedding weights"
+      ]
+    ] ++
+      Shared.common_options([:rotary_embedding_scaling_strategy]) ++
+      Shared.token_options(pad_token_id: 200_018)
+
+  @moduledoc """
+  Llama 4 model family.
+
+  Llama 4 interleaves blocks with chunked attention and rotary embedding,
+  and blocks with full attention and no position embedding. Its feed-forward
+  networks are mixtures of experts with a shared expert.
+
+  Multimodal checkpoints, `Llama4ForConditionalGeneration`, load as their
+  language model.
+
+  ## Architectures
+
+    * `:base` - plain Llama 4 without any head on top
+
+    * `:for_causal_language_modeling` - Llama 4 with a language modeling
+      head. The head returns logits for each token in the original
+      sequence
+
+  ## Inputs
+
+    * `"input_ids"` - `{batch_size, sequence_length}`
+
+      Indices of input sequence tokens in the vocabulary.
+
+    * `"attention_mask"` - `{batch_size, sequence_length}`
+
+      Mask indicating which tokens to attend to. This is used to ignore
+      padding tokens, which are added when processing a batch of sequences
+      with different length.
+
+    * `"position_ids"` - `{batch_size, sequence_length}`
+
+      Indices of positions of each input sequence tokens in the position
+      embeddings.
+
+    * `"attention_head_mask"` - `{encoder_num_blocks, encoder_num_attention_heads}`
+
+      Mask to nullify selected heads of the self-attention blocks in
+      the encoder.
+
+    * `"input_embeddings"` - `{batch_size, sequence_length, hidden_size}`
+
+      Embedded representation of `"input_ids"`, which can be specified
+      for more control over how `"input_ids"` are embedded than the
+      model's internal embedding lookup. If `"input_embeddings"` are present,
+      then `"input_ids"` will be ignored.
+
+    * `"cache"`
+
+      A container with cached layer results used to speed up sequential
+      decoding (autoregression). With cache, certain hidden states are
+      taken from the cache, rather than recomputed on every decoding
+      pass. The cache should be treated as opaque and initialized with
+      `Bumblebee.Text.Generation.init_cache/4`.
+
+  ## Global layer options
+
+  #{Shared.global_layer_options_doc([:output_hidden_states, :output_attentions])}
+
+  ## Configuration
+
+  #{Shared.options_doc(options)}
+  """
+
+  defstruct [architecture: :base] ++ Shared.option_defaults(options)
+
+  @behaviour Bumblebee.ModelSpec
+  @behaviour Bumblebee.Configurable
+  @behaviour Bumblebee.Text.Generation
+
+  import Bumblebee.Utils.Model, only: [join: 2]
+  import Nx.Defn
+
+  alias Bumblebee.Layers
+
+  @impl true
+  def architectures(), do: [:base, :for_causal_language_modeling]
+
+  @impl true
+  def config(spec, opts) do
+    Shared.put_config_attrs(spec, opts)
+  end
+
+  @impl true
+  def input_template(_spec) do
+    %{
+      "input_ids" => Nx.template({1, 1}, :s64)
+    }
+  end
+
+  @impl true
+  def init_cache(spec, batch_size, max_length, _inputs) do
+    Layers.Decoder.init_cache(batch_size, max_length,
+      hidden_size: spec.hidden_size,
+      attention_head_size: spec.attention_head_size,
+      decoder_num_attention_heads: spec.num_attention_heads,
+      decoder_num_key_value_heads: spec.num_key_value_heads,
+      decoder_num_blocks: spec.num_blocks
+    )
+  end
+
+  @impl true
+  def model(%__MODULE__{architecture: :base} = spec) do
+    inputs = inputs(spec)
+
+    inputs
+    |> core(spec)
+    |> Layers.output()
+  end
+
+  def model(%__MODULE__{architecture: :for_causal_language_modeling} = spec) do
+    inputs = inputs(spec)
+
+    outputs = core(inputs, spec)
+    logits = language_modeling_head(outputs.hidden_state, spec, name: "language_modeling_head")
+
+    Layers.output(%{
+      logits: logits,
+      hidden_states: outputs.hidden_states,
+      attentions: outputs.attentions,
+      cache: outputs.cache
+    })
+  end
+
+  defp inputs(spec) do
+    shape = {nil, nil}
+    hidden_shape = {nil, nil, spec.hidden_size}
+
+    attention_head_mask_shape = {spec.num_blocks, spec.num_attention_heads}
+
+    Bumblebee.Utils.Model.inputs_to_map([
+      Axon.input("input_ids", optional: true, shape: shape),
+      Axon.input("attention_mask", optional: true, shape: shape),
+      Axon.input("position_ids", optional: true, shape: shape),
+      Axon.input("attention_head_mask", optional: true, shape: attention_head_mask_shape),
+      Axon.input("input_embeddings", optional: true, shape: hidden_shape),
+      Axon.input("cache", optional: true)
+    ])
+  end
+
+  defp core(inputs, spec) do
+    embeddings =
+      Layers.default inputs["input_embeddings"] do
+        Axon.embedding(inputs["input_ids"], spec.vocab_size, spec.hidden_size,
+          kernel_initializer: kernel_initializer(spec),
+          name: "embedder.token_embedding"
+        )
+      end
+
+    position_ids =
+      Layers.default inputs["position_ids"] do
+        Layers.default_position_ids(embeddings)
+      end
+
+    decoder_outputs =
+      decoder(
+        embeddings,
+        position_ids,
+        inputs["attention_mask"],
+        inputs["attention_head_mask"],
+        inputs["cache"],
+        spec,
+        name: "decoder"
+      )
+
+    hidden_state =
+      Layers.rms_norm(decoder_outputs.hidden_state,
+        name: "output_norm",
+        epsilon: spec.layer_norm_epsilon
+      )
+
+    %{
+      hidden_state: hidden_state,
+      hidden_states: Layers.append(decoder_outputs.hidden_states, hidden_state),
+      attentions: decoder_outputs.attentions,
+      cache: decoder_outputs.cache
+    }
+  end
+
+  defp decoder(
+         hidden_state,
+         position_ids,
+         attention_mask,
+         attention_head_mask,
+         cache,
+         spec,
+         opts
+       ) do
+    name = opts[:name]
+    layer_types = layer_types(spec)
+    expert_block_indices = expert_block_indices(spec)
+
+    Layers.Transformer.blocks(
+      hidden_state,
+      [
+        num_blocks: spec.num_blocks,
+        attention_mask: attention_mask,
+        attention_head_mask: attention_head_mask,
+        cache: cache,
+        name: join(name, "blocks")
+      ],
+      fn hidden_state, block ->
+        name = block.name
+
+        shortcut = hidden_state
+
+        {hidden_state, attention, self_attention_cache} =
+          hidden_state
+          |> Layers.rms_norm(
+            epsilon: spec.layer_norm_epsilon,
+            name: join(name, "self_attention_norm")
+          )
+          |> attention(position_ids, block, Enum.at(layer_types, block.index), spec,
+            name: join(name, "self_attention")
+          )
+
+        hidden_state = Axon.add(hidden_state, shortcut)
+
+        shortcut = hidden_state
+
+        hidden_state =
+          Layers.rms_norm(hidden_state,
+            epsilon: spec.layer_norm_epsilon,
+            name: join(name, "output_norm")
+          )
+
+        hidden_state =
+          if block.index in expert_block_indices do
+            experts(hidden_state, spec, name: join(name, "ffn"))
+          else
+            Layers.Transformer.gated_ffn(
+              hidden_state,
+              spec.dense_intermediate_size,
+              spec.hidden_size,
+              activation: spec.activation,
+              kernel_initializer: kernel_initializer(spec),
+              name: join(name, "ffn")
+            )
+          end
+
+        %{
+          hidden_state: Axon.add(hidden_state, shortcut),
+          attention: attention,
+          self_attention_cache: self_attention_cache
+        }
+      end
+    )
+  end
+
+  defp attention(hidden_state, position_ids, block, layer_type, spec, opts) do
+    name = opts[:name]
+    head_size = spec.attention_head_size
+
+    project = fn num_heads, suffix ->
+      Layers.Transformer.project_heads(hidden_state, num_heads, head_size,
+        use_bias: false,
+        kernel_initializer: kernel_initializer(spec),
+        name: join(name, suffix)
+      )
+    end
+
+    query = project.(spec.num_attention_heads, "query")
+    key = project.(spec.num_key_value_heads, "key")
+    value = project.(spec.num_key_value_heads, "value")
+
+    {query, key} =
+      case layer_type do
+        :chunked_attention ->
+          {query, key} =
+            Layers.Transformer.rotary_embedding(
+              query,
+              key,
+              block.attention_mask,
+              head_size,
+              [
+                position_ids: position_ids,
+                max_positions: spec.max_positions,
+                base: spec.rotary_embedding_base,
+                scaling_strategy: spec.rotary_embedding_scaling_strategy
+              ],
+              name: join(name, "rotary_embedding")
+            )
+
+          if spec.use_query_key_norm do
+            norm = &Axon.nx(&1, fn x -> unit_rms(x, spec.layer_norm_epsilon) end)
+            {norm.(query), norm.(key)}
+          else
+            {query, key}
+          end
+
+        :full_attention ->
+          query =
+            if spec.attention_temperature_tuning do
+              Axon.layer(&scale_query/3, [query, Axon.optional(block.offset)],
+                scale: spec.attention_temperature_scale,
+                positions: spec.attention_temperature_positions,
+                op_name: :scale_query
+              )
+            else
+              query
+            end
+
+          {query, key}
+      end
+
+    {key, value, attention_cache} =
+      Layers.Decoder.cached_attention_key_values(
+        key,
+        value,
+        block.self_attention_cache,
+        block.offset
+      )
+
+    num_key_value_groups = div(spec.num_attention_heads, spec.num_key_value_heads)
+    key = Layers.Transformer.repeat_heads(key, num_key_value_groups)
+    value = Layers.Transformer.repeat_heads(value, num_key_value_groups)
+
+    bias =
+      case layer_type do
+        :chunked_attention ->
+          Axon.layer(&chunk_bias/4, [query, key, Axon.optional(block.offset)],
+            size: spec.attention_chunk_size,
+            op_name: :chunk_bias
+          )
+
+        :full_attention ->
+          Layers.none()
+      end
+
+    {attention_output, attention_weights} =
+      Layers.attention(
+        query,
+        key,
+        value,
+        block.attention_mask,
+        block.attention_head_mask,
+        bias,
+        block.offset,
+        causal: true
+      )
+
+    attention_output =
+      Layers.Transformer.output_projection(attention_output, spec.hidden_size,
+        use_bias: false,
+        kernel_initializer: kernel_initializer(spec),
+        name: join(name, "output")
+      )
+
+    {attention_output, attention_weights, attention_cache}
+  end
+
+  # Positions count from the start of the cache, as in transformers,
+  # not from the position ids
+  defp scale_query(query, offset, opts) do
+    positions = Nx.iota({Nx.axis_size(query, 1)}) |> Nx.add(offset(offset))
+
+    scale =
+      positions
+      |> Nx.add(1)
+      |> Nx.as_type(Nx.type(query))
+      |> Nx.divide(opts[:positions])
+      |> Nx.floor()
+      |> Nx.log1p()
+      |> Nx.multiply(opts[:scale])
+      |> Nx.add(1)
+
+    Nx.multiply(query, Nx.reshape(scale, {1, :auto, 1, 1}))
+  end
+
+  defp chunk_bias(query, key, offset, opts) do
+    query_chunks =
+      Nx.iota({Nx.axis_size(query, 1)}) |> Nx.add(offset(offset)) |> Nx.quotient(opts[:size])
+
+    key_chunks = Nx.iota({Nx.axis_size(key, 1)}) |> Nx.quotient(opts[:size])
+
+    Nx.equal(Nx.new_axis(query_chunks, 1), Nx.new_axis(key_chunks, 0))
+    |> Nx.select(Nx.tensor(0, type: Nx.type(query)), Nx.Constants.min_finite(Nx.type(query)))
+    |> Nx.reshape({1, 1, Nx.axis_size(query, 1), Nx.axis_size(key, 1)})
+  end
+
+  defp unit_rms(x, epsilon) do
+    f32 = Nx.as_type(x, :f32)
+    variance = f32 |> Nx.pow(2) |> Nx.mean(axes: [-1], keep_axes: true)
+    f32 |> Nx.multiply(Nx.rsqrt(Nx.add(variance, epsilon))) |> Nx.as_type(Nx.type(x))
+  end
+
+  defp offset(%Axon.None{}), do: 0
+  defp offset(offset), do: offset
+
+  defp experts(hidden_state, spec, opts) do
+    name = opts[:name]
+
+    router_logits =
+      Axon.dense(hidden_state, spec.num_experts,
+        use_bias: false,
+        kernel_initializer: kernel_initializer(spec),
+        name: join(name, "router")
+      )
+
+    {weights, experts} =
+      Axon.layer(&route/2, [router_logits],
+        num_experts_per_token: spec.num_experts_per_token,
+        op_name: :route
+      )
+      |> Layers.unwrap_tuple(2)
+
+    # Llama 4 weights the input of each chosen expert, not its output, so
+    # every chosen expert gets its own weighted copy of the token, which
+    # goes through that expert alone
+    expert_inputs = Axon.layer(&expert_inputs/3, [hidden_state, weights], op_name: :expert_inputs)
+    expert_ids = Axon.nx(experts, &Nx.reshape(&1, {Nx.axis_size(&1, 0), :auto, 1}))
+    expert_weights = Axon.nx(expert_ids, &Nx.broadcast(1, &1))
+
+    expert_outputs =
+      Layers.Transformer.mixture_of_experts(
+        expert_inputs,
+        expert_weights,
+        expert_ids,
+        spec.intermediate_size,
+        spec.hidden_size,
+        num_experts: spec.num_experts,
+        activation: spec.activation,
+        kernel_initializer: kernel_initializer(spec),
+        name: name
+      )
+
+    routed =
+      Axon.layer(&sum_expert_outputs/3, [expert_outputs, hidden_state],
+        op_name: :sum_expert_outputs
+      )
+
+    shared =
+      Layers.Transformer.gated_ffn(hidden_state, spec.intermediate_size, spec.hidden_size,
+        activation: spec.activation,
+        kernel_initializer: kernel_initializer(spec),
+        name: join(name, "shared_expert")
+      )
+
+    Axon.add(routed, shared)
+  end
+
+  defnp route(router_logits, opts \\ []) do
+    opts = keyword!(opts, [:num_experts_per_token, mode: :inference])
+    scores = Axon.Activations.sigmoid(Nx.as_type(router_logits, :f32))
+    Nx.top_k(scores, k: opts[:num_experts_per_token])
+  end
+
+  defnp expert_inputs(hidden_state, weights, _opts \\ []) do
+    {batch_size, _sequence_length, hidden_size} = Nx.shape(hidden_state)
+    weights = Nx.as_type(weights, Nx.type(hidden_state))
+
+    (Nx.new_axis(hidden_state, 2) * Nx.new_axis(weights, -1))
+    |> Nx.reshape({batch_size, :auto, hidden_size})
+  end
+
+  defnp sum_expert_outputs(expert_outputs, hidden_state, _opts \\ []) do
+    {batch_size, sequence_length, hidden_size} = Nx.shape(hidden_state)
+
+    expert_outputs
+    |> Nx.reshape({batch_size, sequence_length, :auto, hidden_size})
+    |> Nx.sum(axes: [2])
+  end
+
+  defp layer_types(spec) do
+    spec.layer_types ||
+      for index <- 0..(spec.num_blocks - 1) do
+        if rem(index + 1, 4) == 0, do: :full_attention, else: :chunked_attention
+      end
+  end
+
+  defp expert_block_indices(spec) do
+    spec.expert_block_indices ||
+      Enum.to_list((spec.expert_block_step - 1)..(spec.num_blocks - 1)//spec.expert_block_step)
+  end
+
+  defp language_modeling_head(hidden_state, spec, opts) do
+    name = opts[:name]
+
+    Layers.dense_transposed(hidden_state, spec.vocab_size,
+      kernel_initializer: kernel_initializer(spec),
+      name: join(name, "output")
+    )
+  end
+
+  defp kernel_initializer(spec) do
+    Axon.Initializers.normal(scale: spec.initializer_scale)
+  end
+
+  defimpl Bumblebee.HuggingFace.Transformers.Config do
+    def load(spec, %{"model_type" => "llama4", "text_config" => %{} = text_config}) do
+      load(spec, text_config)
+    end
+
+    def load(spec, data) do
+      import Shared.Converters
+
+      num_blocks = data["num_hidden_layers"]
+
+      # transformers derives the attention type of each block from
+      # no_rope_layers, where 1 marks a block with rotary embedding
+      layer_types =
+        case data do
+          %{"layer_types" => [_ | _]} ->
+            %{}
+
+          %{"no_rope_layers" => [_ | _] = no_rope_layers} ->
+            %{
+              "layer_types" =>
+                Enum.map(
+                  no_rope_layers,
+                  &if(&1 == 1, do: "chunked_attention", else: "full_attention")
+                )
+            }
+
+          %{"no_rope_layer_interval" => interval} when is_integer(num_blocks) ->
+            %{
+              "layer_types" =>
+                for index <- 0..(num_blocks - 1) do
+                  if rem(index + 1, interval) == 0,
+                    do: "full_attention",
+                    else: "chunked_attention"
+                end
+            }
+
+          _ ->
+            %{}
+        end
+
+      data = Map.merge(data, layer_types)
+
+      # Some checkpoints set the flag to a number, which transformers
+      # reads by truthiness
+      data =
+        case data do
+          %{"attn_temperature_tuning" => value} when is_number(value) ->
+            %{data | "attn_temperature_tuning" => value != 0}
+
+          data ->
+            data
+        end
+
+      opts =
+        convert!(data,
+          vocab_size: {"vocab_size", number()},
+          max_positions: {"max_position_embeddings", number()},
+          hidden_size: {"hidden_size", number()},
+          intermediate_size: {"intermediate_size", number()},
+          dense_intermediate_size: {"intermediate_size_mlp", number()},
+          attention_head_size: {"head_dim", number()},
+          num_blocks: {"num_hidden_layers", number()},
+          num_attention_heads: {"num_attention_heads", number()},
+          num_key_value_heads: {"num_key_value_heads", number()},
+          layer_types:
+            {"layer_types",
+             list(
+               mapping(%{
+                 "chunked_attention" => :chunked_attention,
+                 "full_attention" => :full_attention
+               })
+             )},
+          attention_chunk_size: {"attention_chunk_size", number()},
+          use_query_key_norm: {"use_qk_norm", boolean()},
+          attention_temperature_tuning: {"attn_temperature_tuning", boolean()},
+          attention_temperature_scale: {"attn_scale", number()},
+          attention_temperature_positions: {"floor_scale", number()},
+          num_experts: {"num_local_experts", number()},
+          num_experts_per_token: {"num_experts_per_tok", number()},
+          expert_block_step: {"interleave_moe_layer_step", number()},
+          expert_block_indices: {"moe_layers", list(number())},
+          activation: {"hidden_act", activation()},
+          initializer_scale: {"initializer_range", number()},
+          layer_norm_epsilon: {"rms_norm_eps", number()},
+          tie_word_embeddings: {"tie_word_embeddings", boolean()}
+        ) ++
+          Shared.rotary_embedding_options_from_transformers(data) ++
+          Shared.common_options_from_transformers(data, spec)
+
+      @for.config(spec, opts)
+    end
+  end
+
+  defimpl Bumblebee.HuggingFace.Transformers.Model do
+    def params_mapping(spec) do
+      # Multimodal checkpoints store the language model under another
+      # prefix. Without a head, the prefix is inferred on load
+      layer =
+        case spec.architecture do
+          :base -> fn name -> "model." <> name end
+          _ -> fn name -> ["model." <> name, "language_model.model." <> name] end
+        end
+
+      block = fn name -> layer.("layers.{n}." <> name) end
+
+      %{
+        "embedder.token_embedding" => layer.("embed_tokens"),
+        "decoder.blocks.{n}.self_attention.query" =>
+          rotary_kernel(block.("self_attn.q_proj"), spec),
+        "decoder.blocks.{n}.self_attention.key" =>
+          rotary_kernel(block.("self_attn.k_proj"), spec),
+        "decoder.blocks.{n}.self_attention.value" => block.("self_attn.v_proj"),
+        "decoder.blocks.{n}.self_attention.output" => block.("self_attn.o_proj"),
+        "decoder.blocks.{n}.self_attention_norm" => block.("input_layernorm"),
+        "decoder.blocks.{n}.ffn.gate" => block.("feed_forward.gate_proj"),
+        "decoder.blocks.{n}.ffn.intermediate" => block.("feed_forward.up_proj"),
+        "decoder.blocks.{n}.ffn.output" => block.("feed_forward.down_proj"),
+        "decoder.blocks.{n}.ffn.router" => block.("feed_forward.router"),
+        "decoder.blocks.{n}.ffn.experts" => %{
+          "gate_kernel" => fused_expert_kernel(block.("feed_forward.experts"), 0),
+          "intermediate_kernel" => fused_expert_kernel(block.("feed_forward.experts"), 1),
+          "output_kernel" => {
+            source_alternatives(block.("feed_forward.experts"), "down_proj"),
+            fn [kernel] -> Nx.transpose(kernel, axes: [0, 2, 1]) end
+          }
+        },
+        "decoder.blocks.{n}.ffn.shared_expert.gate" =>
+          block.("feed_forward.shared_expert.gate_proj"),
+        "decoder.blocks.{n}.ffn.shared_expert.intermediate" =>
+          block.("feed_forward.shared_expert.up_proj"),
+        "decoder.blocks.{n}.ffn.shared_expert.output" =>
+          block.("feed_forward.shared_expert.down_proj"),
+        "decoder.blocks.{n}.output_norm" => block.("post_attention_layernorm"),
+        "output_norm" => layer.("norm"),
+        "language_modeling_head.output" =>
+          cond do
+            spec.tie_word_embeddings -> layer.("embed_tokens")
+            spec.architecture == :base -> "lm_head"
+            true -> ["lm_head", "language_model.lm_head"]
+          end
+      }
+    end
+
+    # Llama 4 rotates adjacent pairs of each head, while Bumblebee
+    # rotates the first half against the second. Reordering each head
+    # of the query and key projections to even then odd channels makes
+    # the two the same. Attention and the norm do not depend on the
+    # channel order, as long as queries and keys share it
+    defp rotary_kernel(layer_names, spec) do
+      %{
+        "kernel" => {
+          source_alternatives(layer_names, "weight"),
+          fn [kernel] ->
+            {out_size, in_size} = Nx.shape(kernel)
+            head_size = spec.attention_head_size
+
+            kernel
+            |> Nx.reshape({div(out_size, head_size), div(head_size, 2), 2, in_size})
+            |> Nx.transpose(axes: [0, 2, 1, 3])
+            |> Nx.reshape({out_size, in_size})
+            |> Nx.transpose()
+          end
+        }
+      }
+    end
+
+    # gate_up_proj is {num_experts, in, 2 * intermediate}, with the gate
+    # first, and expert kernels are {num_experts, out, in}
+    defp fused_expert_kernel(layer_names, index) do
+      {
+        source_alternatives(layer_names, "gate_up_proj"),
+        fn [kernel] ->
+          size = div(Nx.axis_size(kernel, 2), 2)
+
+          kernel
+          |> Nx.slice_along_axis(index * size, size, axis: 2)
+          |> Nx.transpose(axes: [0, 2, 1])
+        end
+      }
+    end
+
+    defp source_alternatives(layer_names, param_name) do
+      [Enum.map(List.wrap(layer_names), &{&1, param_name})]
+    end
+  end
+end
