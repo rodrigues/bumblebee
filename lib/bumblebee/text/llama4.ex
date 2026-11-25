@@ -709,18 +709,10 @@ defmodule Bumblebee.Text.Llama4 do
 
   defimpl Bumblebee.HuggingFace.Transformers.Model do
     def params_mapping(spec) do
-      # Multimodal checkpoints store the language model under another
-      # prefix. Without a head, the prefix is inferred on load
-      layer =
-        case spec.architecture do
-          :base -> fn name -> "model." <> name end
-          _ -> fn name -> ["model." <> name, "language_model.model." <> name] end
-        end
-
-      block = fn name -> layer.("layers.{n}." <> name) end
+      block = fn name -> "model.layers.{n}." <> name end
 
       %{
-        "embedder.token_embedding" => layer.("embed_tokens"),
+        "embedder.token_embedding" => "model.embed_tokens",
         "decoder.blocks.{n}.self_attention.query" =>
           rotary_kernel(block.("self_attn.q_proj"), spec),
         "decoder.blocks.{n}.self_attention.key" =>
@@ -747,13 +739,9 @@ defmodule Bumblebee.Text.Llama4 do
         "decoder.blocks.{n}.ffn.shared_expert.output" =>
           block.("feed_forward.shared_expert.down_proj"),
         "decoder.blocks.{n}.output_norm" => block.("post_attention_layernorm"),
-        "output_norm" => layer.("norm"),
+        "output_norm" => "model.norm",
         "language_modeling_head.output" =>
-          cond do
-            spec.tie_word_embeddings -> layer.("embed_tokens")
-            spec.architecture == :base -> "lm_head"
-            true -> ["lm_head", "language_model.lm_head"]
-          end
+          if(spec.tie_word_embeddings, do: "model.embed_tokens", else: "lm_head")
       }
     end
 
