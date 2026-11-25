@@ -297,6 +297,96 @@ defmodule Bumblebee.Text.PreTrainedTokenizerTest do
     )
   end
 
+  # The repository has only a tiktoken vocabulary, which is converted on load
+  test ":kimi" do
+    assert {:ok, tokenizer} =
+             Bumblebee.load_tokenizer({:hf, "mlx-community/Kimi-Linear-48B-A3B-Instruct-4bit"})
+
+    assert %Bumblebee.Text.PreTrainedTokenizer{type: :kimi} = tokenizer
+
+    tokenizer = Bumblebee.configure(tokenizer, add_special_tokens: false)
+
+    inputs =
+      Bumblebee.apply_tokenizer(tokenizer, [
+        "<|im_user|>user<|im_middle|>What is the capital of France? Answer in one sentence.<|im_end|><|im_assistant|>assistant<|im_middle|>",
+        "Café déjà vu, 你好世界! 🚀 It's 2026."
+      ])
+
+    assert_equal(
+      inputs["input_ids"],
+      Nx.tensor([
+        [
+          163_587,
+          2482,
+          163_601,
+          5376,
+          387,
+          276,
+          10484,
+          318,
+          15383,
+          30,
+          61982,
+          306,
+          1101,
+          23819,
+          13,
+          163_586,
+          163_588,
+          69702,
+          163_601
+        ],
+        [
+          34,
+          2680,
+          1941,
+          17655,
+          157_279,
+          62076,
+          11,
+          220,
+          33845,
+          2243,
+          0,
+          17137,
+          40101,
+          8629,
+          220,
+          2975,
+          21,
+          13,
+          163_839
+        ]
+      ])
+    )
+
+    assert Bumblebee.Tokenizer.decode(tokenizer, [
+             34,
+             2680,
+             1941,
+             17655,
+             157_279,
+             62076,
+             11,
+             220,
+             33845,
+             2243,
+             0,
+             17137,
+             40101,
+             8629,
+             220,
+             2975,
+             21,
+             13
+           ]) ==
+             "Café déjà vu, 你好世界! 🚀 It's 2026."
+
+    assert Bumblebee.Tokenizer.special_token(tokenizer, :eos) == "[EOS]"
+    assert Bumblebee.Tokenizer.token_to_id(tokenizer, "[EOS]") == 163_585
+    assert Bumblebee.Tokenizer.token_to_id(tokenizer, "[PAD]") == 163_839
+  end
+
   test ":layout_lm" do
     assert {:ok, tokenizer} = Bumblebee.load_tokenizer({:hf, "microsoft/layoutlm-base-uncased"})
 

@@ -68,6 +68,7 @@ defmodule Bumblebee do
   @featurizer_filename "preprocessor_config.json"
   @tokenizer_filename "tokenizer.json"
   @tokenizer_config_filename "tokenizer_config.json"
+  @tiktoken_filename "tiktoken.model"
   @tokenizer_special_tokens_filename "special_tokens_map.json"
   @generation_filename "generation_config.json"
   @scheduler_filename "scheduler_config.json"
@@ -302,6 +303,7 @@ defmodule Bumblebee do
     "gpt_bigcode" => :gpt2,
     "layoutlm" => :layout_lm,
     "llama" => :llama,
+    "kimi_linear" => :kimi,
     "llama4" => :llama,
     "llama4_text" => :llama,
     "mistral" => :llama,
@@ -989,53 +991,15 @@ defmodule Bumblebee do
     case get_repo_files(repository) do
       {:ok, %{@tokenizer_filename => etag} = repo_files} ->
         with {:ok, path} <- download(repository, @tokenizer_filename, etag) do
-          type =
-            type ||
-              case infer_tokenizer_type(repository, repo_files) do
-                {:ok, type} ->
-                  type
+          load_tokenizer_file(repository, repo_files, path, type)
+        end
 
-                {:error, error} ->
-                  raise ArgumentError, "#{error}, please specify the :type option"
-              end
-
-          tokenizer_config_result =
-            if Map.has_key?(repo_files, @tokenizer_config_filename) do
-              etag = repo_files[@tokenizer_config_filename]
-
-              with {:ok, path} <- download(repository, @tokenizer_config_filename, etag) do
-                decode_config(path)
-              end
-            else
-              {:ok, %{}}
-            end
-
-          special_tokens_map_result =
-            if Map.has_key?(repo_files, @tokenizer_special_tokens_filename) do
-              etag = repo_files[@tokenizer_special_tokens_filename]
-
-              with {:ok, path} <- download(repository, @tokenizer_special_tokens_filename, etag) do
-                decode_config(path)
-              end
-            else
-              {:ok, %{}}
-            end
-
-          with {:ok, tokenizer_config} <- tokenizer_config_result,
-               {:ok, special_tokens_map} <- special_tokens_map_result do
-            tokenizer = struct!(Bumblebee.Text.PreTrainedTokenizer, type: type)
-
-            tokenizer =
-              HuggingFace.Transformers.Config.load(tokenizer, %{
-                "tokenizer_file" => path,
-                # Note: special_tokens_map.json is a legacy file, now
-                # tokenizer_config.json includes the same information
-                # and takes precedence
-                "special_tokens_map" => Map.merge(tokenizer_config, special_tokens_map)
-              })
-
-            {:ok, tokenizer}
-          end
+      {:ok, %{@tiktoken_filename => etag, @tokenizer_config_filename => _} = repo_files} ->
+        with {:ok, tiktoken_path} <- download(repository, @tiktoken_filename, etag),
+             {:ok, tokenizer_config} <- load_tokenizer_config(repository, repo_files) do
+          type = type || infer_tokenizer_type!(repository, repo_files)
+          path = convert_tiktoken(tiktoken_path, type, tokenizer_config)
+          load_tokenizer_file(repository, repo_files, path, type)
         end
 
       {:ok, %{@tokenizer_config_filename => _}} ->
@@ -1049,6 +1013,79 @@ defmodule Bumblebee do
 
       {:error, message} ->
         {:error, message}
+    end
+  end
+
+  defp load_tokenizer_file(repository, repo_files, path, type) do
+    type = type || infer_tokenizer_type!(repository, repo_files)
+
+    special_tokens_map_result =
+      if Map.has_key?(repo_files, @tokenizer_special_tokens_filename) do
+        etag = repo_files[@tokenizer_special_tokens_filename]
+
+        with {:ok, path} <- download(repository, @tokenizer_special_tokens_filename, etag) do
+          decode_config(path)
+        end
+      else
+        {:ok, %{}}
+      end
+
+    with {:ok, tokenizer_config} <- load_tokenizer_config(repository, repo_files),
+         {:ok, special_tokens_map} <- special_tokens_map_result do
+      tokenizer = struct!(Bumblebee.Text.PreTrainedTokenizer, type: type)
+
+      tokenizer =
+        HuggingFace.Transformers.Config.load(tokenizer, %{
+          "tokenizer_file" => path,
+          # Note: special_tokens_map.json is a legacy file, now
+          # tokenizer_config.json includes the same information
+          # and takes precedence
+          "special_tokens_map" => Map.merge(tokenizer_config, special_tokens_map)
+        })
+
+      {:ok, tokenizer}
+    end
+  end
+
+  defp load_tokenizer_config(repository, repo_files) do
+    if Map.has_key?(repo_files, @tokenizer_config_filename) do
+      etag = repo_files[@tokenizer_config_filename]
+
+      with {:ok, path} <- download(repository, @tokenizer_config_filename, etag) do
+        decode_config(path)
+      end
+    else
+      {:ok, %{}}
+    end
+  end
+
+  # The converted tokenizer is cached by its sources and the converter's
+  # code, so it is built once per vocabulary
+  defp convert_tiktoken(tiktoken_path, type, tokenizer_config) do
+    key =
+      :crypto.hash(:sha256, [
+        File.read!(tiktoken_path),
+        :erlang.term_to_binary(
+          {type, tokenizer_config, Bumblebee.Text.Tiktoken.module_info(:md5)}
+        )
+      ])
+      |> Base.encode16(case: :lower)
+
+    path = Path.join([cache_dir(), "tiktoken", key <> ".json"])
+
+    unless File.exists?(path) do
+      json = Bumblebee.Text.Tiktoken.tokenizer_json(tiktoken_path, type, tokenizer_config)
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, Jason.encode!(json))
+    end
+
+    path
+  end
+
+  defp infer_tokenizer_type!(repository, repo_files) do
+    case infer_tokenizer_type(repository, repo_files) do
+      {:ok, type} -> type
+      {:error, error} -> raise ArgumentError, "#{error}, please specify the :type option"
     end
   end
 

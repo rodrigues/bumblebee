@@ -175,6 +175,14 @@ defmodule Bumblebee.Text.PreTrainedTokenizer do
     layout_lm: %{
       special_tokens: %{unk: "[UNK]", sep: "[SEP]", pad: "[PAD]", cls: "[CLS]", mask: "[MASK]"}
     },
+    kimi: %{
+      special_tokens: %{
+        bos: "[BOS]",
+        eos: "[EOS]",
+        unk: "[UNK]",
+        pad: "[PAD]"
+      }
+    },
     llama: %{
       special_tokens: %{
         eos: "</s>",
