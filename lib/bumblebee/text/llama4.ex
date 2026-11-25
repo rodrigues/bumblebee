@@ -58,7 +58,8 @@ defmodule Bumblebee.Text.Llama4 do
       ],
       attention_chunk_size: [
         default: 8192,
-        doc: "the number of tokens in each chunk of chunked attention blocks"
+        doc:
+          "the number of tokens in each chunk of chunked attention blocks. When `nil`, those blocks attend to the whole sequence"
       ],
       use_query_key_norm: [
         default: true,
@@ -441,6 +442,9 @@ defmodule Bumblebee.Text.Llama4 do
 
     bias =
       case layer_type do
+        :chunked_attention when spec.attention_chunk_size == nil ->
+          Layers.none()
+
         :chunked_attention ->
           Axon.layer(&chunk_bias/4, [query, key, Axon.optional(block.offset)],
             size: spec.attention_chunk_size,
@@ -682,7 +686,7 @@ defmodule Bumblebee.Text.Llama4 do
                  "full_attention" => :full_attention
                })
              )},
-          attention_chunk_size: {"attention_chunk_size", number()},
+          attention_chunk_size: {"attention_chunk_size", optional(number())},
           use_query_key_norm: {"use_qk_norm", boolean()},
           attention_temperature_tuning: {"attn_temperature_tuning", boolean()},
           attention_temperature_scale: {"attn_scale", number()},

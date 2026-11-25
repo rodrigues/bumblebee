@@ -57,6 +57,26 @@ defmodule Bumblebee.Text.Llama4Test do
     )
   end
 
+  test ":for_causal_language_modeling with a null attention chunk size" do
+    repo = {:hf, "bumblebee-testing/tiny-random-Llama4ForCausalLM"}
+    {:ok, spec} = Bumblebee.load_spec(repo)
+
+    spec =
+      Bumblebee.HuggingFace.Transformers.Config.load(spec, %{"attention_chunk_size" => nil})
+
+    assert spec.attention_chunk_size == nil
+
+    assert {:ok, %{model: model, params: params}} = Bumblebee.load_model(repo, spec: spec)
+
+    assert {:ok, %{model: causal_model, params: causal_params}} =
+             Bumblebee.load_model(repo, spec: Bumblebee.configure(spec, attention_chunk_size: 12))
+
+    assert_all_close(
+      Axon.predict(model, params, inputs()).logits,
+      Axon.predict(causal_model, causal_params, inputs()).logits
+    )
+  end
+
   test ":for_causal_language_modeling with experts in every other block" do
     assert {:ok, %{model: model, params: params, spec: spec}} =
              Bumblebee.load_model(
