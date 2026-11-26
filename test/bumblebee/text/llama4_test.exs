@@ -118,10 +118,9 @@ defmodule Bumblebee.Text.Llama4Test do
     repo = {:hf, "bumblebee-testing/tiny-random-Llama4ForCausalLM"}
     offset = 65_520
 
-    # EXLA fuses the cast of the positions with the division and computes
-    # it in float32, so this runs on a backend that rounds every step. The
-    # temperature depends only on the cache offset, so a short cache keeps
-    # it fast
+    # The positions do not overflow on EXLA, so this runs on a backend
+    # that rounds every step to float16. The temperature depends only on
+    # the cache offset, so a short cache keeps it fast
     logits = fn type ->
       Nx.with_default_backend(Nx.BinaryBackend, fn ->
         assert {:ok, %{model: model, params: params, spec: spec}} =
