@@ -98,6 +98,7 @@ defmodule Bumblebee.MixProject do
           Bumblebee.Text.GptBigCode,
           Bumblebee.Text.GptNeoX,
           Bumblebee.Text.Llama,
+          Bumblebee.Text.Llama4,
           Bumblebee.Text.M2m100,
           Bumblebee.Text.Mbart,
           Bumblebee.Text.Mistral,
