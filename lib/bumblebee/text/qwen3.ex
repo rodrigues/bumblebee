@@ -72,8 +72,8 @@ defmodule Bumblebee.Text.Qwen3 do
       num_experts: [
         default: nil,
         doc: """
-        the number of experts in the mixture-of-experts blocks. When `nil`, every block
-        uses a dense feed-forward network
+        the number of experts in the mixture-of-experts blocks. When `nil` or 0, every
+        block uses a dense feed-forward network
         """
       ],
       num_experts_per_token: [
@@ -94,7 +94,7 @@ defmodule Bumblebee.Text.Qwen3 do
         doc: "the indices of blocks that use a dense feed-forward network instead of experts"
       ],
       normalize_top_k: [
-        default: true,
+        default: false,
         doc: "whether to normalize the router probabilities of the chosen experts to sum to 1"
       ]
     ] ++
@@ -469,9 +469,11 @@ defmodule Bumblebee.Text.Qwen3 do
   end
 
   defp expert_block?(spec, index) do
-    spec.num_experts != nil and index not in spec.dense_block_indices and
+    experts?(spec) and index not in spec.dense_block_indices and
       rem(index + 1, spec.expert_block_step) == 0
   end
+
+  defp experts?(spec), do: spec.num_experts != nil and spec.num_experts > 0
 
   defp language_modeling_head(hidden_state, spec, opts) do
     name = opts[:name]
@@ -521,7 +523,7 @@ defmodule Bumblebee.Text.Qwen3 do
   defimpl Bumblebee.HuggingFace.Transformers.Model do
     def params_mapping(spec) do
       experts =
-        if spec.num_experts do
+        if spec.num_experts != nil and spec.num_experts > 0 do
           stack = fn projection ->
             sources =
               for expert <- 0..(spec.num_experts - 1) do

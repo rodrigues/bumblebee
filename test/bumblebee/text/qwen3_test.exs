@@ -53,6 +53,28 @@ defmodule Bumblebee.Text.Qwen3Test do
     )
   end
 
+  test ":for_causal_language_modeling with zero experts, which uses dense blocks" do
+    repo = {:hf, "bumblebee-testing/tiny-random-Qwen3ForCausalLM"}
+
+    assert {:ok, spec} = Bumblebee.load_spec(repo)
+    spec = Bumblebee.configure(spec, num_experts: 0)
+    assert {:ok, %{model: model, params: params}} = Bumblebee.load_model(repo, spec: spec)
+
+    inputs = %{
+      "input_ids" => Nx.tensor([[10, 20, 30, 40, 50, 60, 70, 80, 0, 0]]),
+      "attention_mask" => Nx.tensor([[1, 1, 1, 1, 1, 1, 1, 1, 0, 0]])
+    }
+
+    outputs = Axon.predict(model, params, inputs)
+
+    assert_all_close(
+      outputs.logits[[.., 1..3, 1..3]],
+      Nx.tensor([
+        [[0.1457, 0.0313, -0.0651], [0.1718, -0.0265, -0.0186], [0.2281, -0.0124, -0.0147]]
+      ])
+    )
+  end
+
   test ":for_sequence_classification" do
     assert {:ok, %{model: model, params: params, spec: spec}} =
              Bumblebee.load_model(
@@ -139,6 +161,39 @@ defmodule Bumblebee.Text.Qwen3Test do
       assert_all_close(
         outputs.logits[[.., .., 1..3]],
         Nx.tensor([[[1.4816, -1.7118, -0.8247], [0.0042, 0.8791, -4.3974]]])
+      )
+    end
+
+    test ":for_causal_language_modeling without normalizing the chosen experts' probabilities" do
+      repo = {:hf, "optimum-internal-testing/tiny-random-qwen3_moe"}
+
+      # Qwen3MoeConfig does not normalize by default, and so does the spec
+      assert %Bumblebee.Text.Qwen3{normalize_top_k: false} =
+               Bumblebee.configure(Bumblebee.Text.Qwen3)
+
+      assert {:ok, spec} = Bumblebee.load_spec(repo)
+      spec = Bumblebee.configure(spec, normalize_top_k: false)
+      assert {:ok, %{model: model, params: params}} = Bumblebee.load_model(repo, spec: spec)
+
+      inputs = %{
+        "input_ids" => Nx.tensor([[10, 20, 30, 40, 50, 60, 70, 80, 0, 0]]),
+        "attention_mask" => Nx.tensor([[1, 1, 1, 1, 1, 1, 1, 1, 0, 0]])
+      }
+
+      outputs = Axon.predict(model, params, inputs)
+
+      assert_all_close(
+        outputs.logits[[.., 1..3, 1..3]],
+        Nx.tensor([
+          [[0.1764, 0.9506, -4.3386], [-0.7170, 0.9216, -4.1042], [5.3185, -0.1513, 1.6662]]
+        ])
+      )
+
+      outputs = Axon.predict(model, params, %{"input_ids" => Nx.tensor([[10, 20]])})
+
+      assert_all_close(
+        outputs.logits[[.., .., 1..3]],
+        Nx.tensor([[[2.3092, -1.7507, -0.8362], [0.1764, 0.9506, -4.3386]]])
       )
     end
 
