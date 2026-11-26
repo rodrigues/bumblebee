@@ -1016,6 +1016,13 @@ defmodule Bumblebee do
         variables: %{}
       ])
 
+    if opts[:continue_final_message] and opts[:add_generation_prompt] do
+      raise ArgumentError,
+            ":continue_final_message and :add_generation_prompt are not compatible," <>
+              " use :continue_final_message to continue the final message and" <>
+              " :add_generation_prompt to start a new assistant message"
+    end
+
     unless Code.ensure_loaded?(Otera.ChatTemplate) do
       raise "Bumblebee.apply_chat_template/3 requires the :otera dependency," <>
               " add {:otera, \"~> 0.2\"} to your dependencies"

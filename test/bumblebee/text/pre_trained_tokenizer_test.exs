@@ -684,6 +684,24 @@ defmodule Bumblebee.Text.PreTrainedTokenizerTest do
                  "<start_of_turn>model\nProcesses awake,"
     end
 
+    test "raises when both continuing the final message and adding a generation prompt" do
+      assert {:ok, tokenizer} = Bumblebee.load_tokenizer({:hf, "unsloth/gemma-7b-it"})
+
+      messages = [
+        %{"role" => "user", "content" => "Write a haiku."},
+        %{"role" => "assistant", "content" => "Processes awake,"}
+      ]
+
+      assert_raise ArgumentError,
+                   ~r/:continue_final_message and :add_generation_prompt are not compatible/,
+                   fn ->
+                     Bumblebee.apply_chat_template(tokenizer, messages,
+                       continue_final_message: true,
+                       add_generation_prompt: true
+                     )
+                   end
+    end
+
     test "encodes the prompt without adding special tokens twice" do
       assert {:ok, tokenizer} = Bumblebee.load_tokenizer({:hf, "unsloth/gemma-7b-it"})
 
