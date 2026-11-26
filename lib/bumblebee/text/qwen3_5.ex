@@ -11,7 +11,7 @@ defmodule Bumblebee.Text.Qwen3_5 do
         """
       ],
       max_positions: [
-        default: 262_144,
+        default: 32_768,
         doc: """
         the vocabulary size of the position embedding. This corresponds to the maximum sequence
         length that this model can process. Typically this is set to a large value just in case,
@@ -19,15 +19,15 @@ defmodule Bumblebee.Text.Qwen3_5 do
         """
       ],
       hidden_size: [
-        default: 1024,
+        default: 4096,
         doc: "the dimensionality of hidden layers"
       ],
       intermediate_size: [
-        default: 3584,
+        default: 12_288,
         doc: "the dimensionality of intermediate layers"
       ],
       num_blocks: [
-        default: 24,
+        default: 32,
         doc: "the number of blocks in the model"
       ],
       layer_types: [
@@ -39,11 +39,11 @@ defmodule Bumblebee.Text.Qwen3_5 do
         """
       ],
       num_attention_heads: [
-        default: 8,
+        default: 16,
         doc: "the number of attention heads in the full attention blocks"
       ],
       num_key_value_heads: [
-        default: 2,
+        default: 4,
         doc: "the number of key value heads in the full attention blocks"
       ],
       attention_head_size: [
@@ -56,7 +56,7 @@ defmodule Bumblebee.Text.Qwen3_5 do
         doc: "the number of query and key heads in the linear attention blocks"
       ],
       linear_attention_num_value_heads: [
-        default: 16,
+        default: 32,
         doc: "the number of value heads in the linear attention blocks"
       ],
       linear_attention_key_head_size: [
@@ -76,7 +76,7 @@ defmodule Bumblebee.Text.Qwen3_5 do
         doc: "the activation function"
       ],
       rotary_embedding_base: [
-        default: 10_000_000,
+        default: 10_000,
         doc: "base for computing rotary embedding frequency"
       ],
       rotary_embedding_percentage: [
@@ -93,7 +93,7 @@ defmodule Bumblebee.Text.Qwen3_5 do
           "the standard deviation of the normal initializer used for initializing kernel parameters"
       ],
       tie_word_embeddings: [
-        default: true,
+        default: false,
         doc: "whether to tie input and output embedding weights"
       ]
     ] ++
