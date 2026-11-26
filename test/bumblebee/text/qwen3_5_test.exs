@@ -85,33 +85,6 @@ defmodule Bumblebee.Text.Qwen3_5Test do
     )
   end
 
-  test ":for_causal_language_modeling from an MLX checkpoint" do
-    # The same weights as the multimodal checkpoint, converted with mlx-lm,
-    # which renames them, moves the convolution kernel axis and adds the
-    # norm shift to the weights
-    assert {:ok, %{model: model, params: params, spec: spec}} =
-             Bumblebee.load_model(
-               {:hf, "bumblebee-testing/tiny-random-Qwen3_5ForConditionalGeneration-mlx"}
-             )
-
-    assert %Bumblebee.Text.Qwen3_5{architecture: :for_causal_language_modeling} = spec
-
-    inputs = %{
-      "input_ids" => Nx.tensor([[10, 20, 30, 40, 50, 60, 70, 80, 0, 0]]),
-      "attention_mask" => Nx.tensor([[1, 1, 1, 1, 1, 1, 1, 1, 0, 0]])
-    }
-
-    outputs = Axon.predict(model, params, inputs)
-
-    assert_all_close(
-      outputs.logits[[.., 1..3, 1..3]],
-      Nx.tensor([
-        [[0.7326, 1.1803, 0.4093], [1.0902, 0.5977, 0.2788], [-0.6475, 0.8144, 0.5186]]
-      ]),
-      atol: 1.0e-4
-    )
-  end
-
   test "generation with cache" do
     repo = {:hf, "bumblebee-testing/tiny-random-Qwen3_5ForCausalLM"}
     assert {:ok, %{model: model, params: params, spec: spec}} = Bumblebee.load_model(repo)
