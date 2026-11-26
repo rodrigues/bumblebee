@@ -1076,7 +1076,12 @@ defmodule Bumblebee do
     unless File.exists?(path) do
       json = Bumblebee.Text.Tiktoken.tokenizer_json(tiktoken_path, type, tokenizer_config)
       File.mkdir_p!(Path.dirname(path))
-      File.write!(path, Jason.encode!(json))
+      # Renaming is atomic, so concurrent loads never read a partial file
+      pid = System.pid()
+      unique = System.unique_integer([:positive])
+      tmp_path = "#{path}.#{pid}.#{unique}.tmp"
+      File.write!(tmp_path, Jason.encode!(json))
+      File.rename!(tmp_path, path)
     end
 
     path
