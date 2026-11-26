@@ -64,7 +64,11 @@ defmodule Bumblebee.Text.Tiktoken do
       if configured == %{} do
         []
       else
-        for id <- map_size(ranks)..Enum.max(Map.keys(configured)) do
+        max_id = Enum.max(Map.keys(configured))
+        reserved_ids = Enum.to_list(map_size(ranks)..max_id//1)
+        ids = Enum.sort(Enum.uniq(Map.keys(configured) ++ reserved_ids))
+
+        for id <- ids do
           token = Map.get(configured, id, %{"content" => "<|reserved_token_#{id}|>"})
 
           %{
