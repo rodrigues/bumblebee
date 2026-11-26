@@ -717,48 +717,93 @@ defmodule Bumblebee.Text.Qwen3_5 do
 
   defimpl Bumblebee.HuggingFace.Transformers.Model do
     def params_mapping(spec) do
-      %{
-        "embedder.token_embedding" => "embed_tokens",
-        "decoder.blocks.{n}.self_attention_norm" => "layers.{n}.input_layernorm",
-        "decoder.blocks.{n}.self_attention.query" => "layers.{n}.self_attn.q_proj",
-        "decoder.blocks.{n}.self_attention.key" => "layers.{n}.self_attn.k_proj",
-        "decoder.blocks.{n}.self_attention.value" => "layers.{n}.self_attn.v_proj",
-        "decoder.blocks.{n}.self_attention.output" => "layers.{n}.self_attn.o_proj",
-        "decoder.blocks.{n}.self_attention.query_norm" => "layers.{n}.self_attn.q_norm",
-        "decoder.blocks.{n}.self_attention.key_norm" => "layers.{n}.self_attn.k_norm",
+      # Text-only, multimodal and MLX checkpoints store the language model
+      # under different prefixes. The loader infers one prefix for every
+      # name in the mapping, but MLX checkpoints keep the head outside the
+      # prefix of the layers, so the causal model lists each prefix, and
+      # the base model, which has no head, relies on the inference
+      layer =
+        case spec.architecture do
+          :base ->
+            fn name -> [name] end
+
+          :for_causal_language_modeling ->
+            fn name ->
+              [
+                "model." <> name,
+                "model.language_model." <> name,
+                "language_model.model." <> name
+              ]
+            end
+        end
+
+      # MLX checkpoints store these norm weights with the shift of 1
+      # added, and the convolution kernel as {channels, kernel_size, 1}
+      # instead of {channels, 1, kernel_size}. As in mlx-lm, the kernel
+      # layout tells the two apart
+      norm = fn name ->
+        %{
+          "weight" =>
+            {[
+               param_refs(layer.(name), "weight"),
+               param_refs(layer.("layers.0.linear_attn.conv1d"), "weight")
+             ],
+             fn [weight, conv_kernel] ->
+               if Nx.axis_size(conv_kernel, -1) == 1, do: Nx.subtract(weight, 1), else: weight
+             end}
+        }
+      end
+
+      mapping = %{
+        "embedder.token_embedding" => layer.("embed_tokens"),
+        "decoder.blocks.{n}.self_attention_norm" => norm.("layers.{n}.input_layernorm"),
+        "decoder.blocks.{n}.self_attention.query" => layer.("layers.{n}.self_attn.q_proj"),
+        "decoder.blocks.{n}.self_attention.key" => layer.("layers.{n}.self_attn.k_proj"),
+        "decoder.blocks.{n}.self_attention.value" => layer.("layers.{n}.self_attn.v_proj"),
+        "decoder.blocks.{n}.self_attention.output" => layer.("layers.{n}.self_attn.o_proj"),
+        "decoder.blocks.{n}.self_attention.query_norm" => norm.("layers.{n}.self_attn.q_norm"),
+        "decoder.blocks.{n}.self_attention.key_norm" => norm.("layers.{n}.self_attn.k_norm"),
         "decoder.blocks.{n}.linear_attention.query_key_value" =>
-          "layers.{n}.linear_attn.in_proj_qkv",
-        "decoder.blocks.{n}.linear_attention.output_gate" => "layers.{n}.linear_attn.in_proj_z",
-        "decoder.blocks.{n}.linear_attention.beta" => "layers.{n}.linear_attn.in_proj_b",
-        "decoder.blocks.{n}.linear_attention.decay" => "layers.{n}.linear_attn.in_proj_a",
+          layer.("layers.{n}.linear_attn.in_proj_qkv"),
+        "decoder.blocks.{n}.linear_attention.output_gate" =>
+          layer.("layers.{n}.linear_attn.in_proj_z"),
+        "decoder.blocks.{n}.linear_attention.beta" => layer.("layers.{n}.linear_attn.in_proj_b"),
+        "decoder.blocks.{n}.linear_attention.decay" => layer.("layers.{n}.linear_attn.in_proj_a"),
         "decoder.blocks.{n}.linear_attention.conv" => %{
           "kernel" =>
-            {[{"layers.{n}.linear_attn.conv1d", "weight"}],
+            {[param_refs(layer.("layers.{n}.linear_attn.conv1d"), "weight")],
              fn [kernel] ->
                {channels, _, _} = Nx.shape(kernel)
                Nx.reshape(kernel, {channels, :auto})
              end}
         },
         "decoder.blocks.{n}.linear_attention.delta_rule" => %{
-          "a_log" => {[{"layers.{n}.linear_attn", "A_log"}], fn [x] -> x end},
-          "dt_bias" => {[{"layers.{n}.linear_attn", "dt_bias"}], fn [x] -> x end}
+          "a_log" => {[param_refs(layer.("layers.{n}.linear_attn"), "A_log")], fn [x] -> x end},
+          "dt_bias" =>
+            {[param_refs(layer.("layers.{n}.linear_attn"), "dt_bias")], fn [x] -> x end}
         },
-        "decoder.blocks.{n}.linear_attention.norm" => "layers.{n}.linear_attn.norm",
-        "decoder.blocks.{n}.linear_attention.output" => "layers.{n}.linear_attn.out_proj",
-        "decoder.blocks.{n}.ffn.gate" => "layers.{n}.mlp.gate_proj",
-        "decoder.blocks.{n}.ffn.intermediate" => "layers.{n}.mlp.up_proj",
-        "decoder.blocks.{n}.ffn.output" => "layers.{n}.mlp.down_proj",
-        "decoder.blocks.{n}.output_norm" => "layers.{n}.post_attention_layernorm",
-        "output_norm" => "norm",
-        "language_modeling_head.output" => language_modeling_head_source(spec.tie_word_embeddings)
+        "decoder.blocks.{n}.linear_attention.norm" => layer.("layers.{n}.linear_attn.norm"),
+        "decoder.blocks.{n}.linear_attention.output" => layer.("layers.{n}.linear_attn.out_proj"),
+        "decoder.blocks.{n}.ffn.gate" => layer.("layers.{n}.mlp.gate_proj"),
+        "decoder.blocks.{n}.ffn.intermediate" => layer.("layers.{n}.mlp.up_proj"),
+        "decoder.blocks.{n}.ffn.output" => layer.("layers.{n}.mlp.down_proj"),
+        "decoder.blocks.{n}.output_norm" => norm.("layers.{n}.post_attention_layernorm"),
+        "output_norm" => norm.("norm"),
+        "language_modeling_head.output" =>
+          if(spec.tie_word_embeddings,
+            do: layer.("embed_tokens"),
+            else: ["lm_head", "language_model.lm_head"]
+          )
       }
+
+      case spec.architecture do
+        :base -> Map.delete(mapping, "language_modeling_head.output")
+        :for_causal_language_modeling -> mapping
+      end
     end
 
-    defp language_modeling_head_source(true), do: "embed_tokens"
-
-    defp language_modeling_head_source(false) do
-      # Give the full parameter name so the loader can find it at the root.
-      %{"kernel" => {[{"lm_head", "lm_head.weight"}], fn [weight] -> weight end}}
+    defp param_refs(layer_names, param_name) do
+      for layer_name <- layer_names, do: {layer_name, param_name}
     end
   end
 end
