@@ -161,35 +161,38 @@ defmodule Bumblebee.Text.MistralTest do
     assert {:ok, %{model: model, params: params}} =
              Bumblebee.load_model({:hf, "hf-tiny-v2/tiny-random-Ministral3ForCausalLM"})
 
-    # Random weights make attention nearly uniform, so sharper queries are
-    # needed for the query scaling to change the logits
-    params =
-      update_in(params.data, fn data ->
-        Map.new(data, fn
-          {"decoder.blocks." <> _ = name, %{"kernel" => kernel} = layer} = entry ->
-            if String.ends_with?(name, "self_attention.query"),
-              do: {name, %{layer | "kernel" => Nx.multiply(kernel, 30.0)}},
-              else: entry
-
-          entry ->
-            entry
-        end)
-      end)
-
-    # The scaling starts at position 16384, the fifth of these
-    inputs = %{
-      "input_ids" => Nx.tensor([[10, 20, 30, 40, 50, 60, 70, 80, 0, 0]]),
-      "attention_mask" => Nx.tensor([[1, 1, 1, 1, 1, 1, 1, 1, 0, 0]]),
-      "position_ids" => Nx.iota({1, 10}) |> Nx.add(16380)
-    }
-
-    outputs = Axon.predict(model, params, inputs)
+    outputs = Axon.predict(model, sharpen_queries(params), far_inputs())
 
     assert_all_close(
       outputs.logits[[.., 3..5, 1..3]],
       Nx.tensor([
         [[-0.0836, -0.0517, 0.1327], [-0.1127, 0.1216, -0.0757], [-0.0838, -0.2484, -0.0081]]
       ])
+    )
+  end
+
+  test "Ministral 3 query scaling past the original context length in float16" do
+    assert {:ok, %{model: model, params: params}} =
+             Bumblebee.load_model({:hf, "hf-tiny-v2/tiny-random-Ministral3ForCausalLM"},
+               type: :f16
+             )
+
+    outputs = Axon.predict(model, sharpen_queries(params), far_inputs())
+
+    # Integer positions above 2048 are not exact in float16, so the scale
+    # has to come from the integer positions to switch at 16384
+    assert_all_close(
+      outputs.logits[[.., 1..5, 1..3]],
+      Nx.tensor([
+        [
+          [0.0937, -0.0620, 0.1614],
+          [-0.1292, -0.1943, 0.1064],
+          [-0.0837, -0.0518, 0.1326],
+          [-0.1127, 0.1216, -0.0759],
+          [-0.0837, -0.2484, -0.0080]
+        ]
+      ]),
+      atol: 5.0e-4
     )
   end
 
@@ -272,5 +275,30 @@ defmodule Bumblebee.Text.MistralTest do
         [[-0.0502, -0.0152, -0.0476], [-0.0307, -0.0575, -0.0609], [0.1117, -0.0575, 0.1333]]
       ])
     )
+  end
+
+  # Random weights make attention nearly uniform, so sharper queries are
+  # needed for the query scaling to change the logits
+  defp sharpen_queries(params) do
+    update_in(params.data, fn data ->
+      Map.new(data, fn
+        {"decoder.blocks." <> _ = name, %{"kernel" => kernel} = layer} = entry ->
+          if String.ends_with?(name, "self_attention.query"),
+            do: {name, %{layer | "kernel" => Nx.multiply(kernel, 30.0)}},
+            else: entry
+
+        entry ->
+          entry
+      end)
+    end)
+  end
+
+  # The scaling starts at position 16384, the fifth of these
+  defp far_inputs() do
+    %{
+      "input_ids" => Nx.tensor([[10, 20, 30, 40, 50, 60, 70, 80, 0, 0]]),
+      "attention_mask" => Nx.tensor([[1, 1, 1, 1, 1, 1, 1, 1, 0, 0]]),
+      "position_ids" => Nx.iota({1, 10}) |> Nx.add(16380)
+    }
   end
 end

@@ -480,10 +480,10 @@ defmodule Bumblebee.Text.Mistral do
   defnp scale_query(query, position_ids, opts \\ []) do
     opts = keyword!(opts, [:beta, :positions, mode: :inference])
 
-    steps = Nx.floor(Nx.as_type(position_ids, Nx.type(query)) / opts[:positions])
+    steps = Nx.quotient(position_ids, opts[:positions])
     scale = Nx.log(steps + 1) * opts[:beta] + 1
 
-    query * (scale |> Nx.new_axis(-1) |> Nx.new_axis(-1))
+    query * Nx.as_type(scale |> Nx.new_axis(-1) |> Nx.new_axis(-1), Nx.type(query))
   end
 
   defp attention_window_size(spec) do
