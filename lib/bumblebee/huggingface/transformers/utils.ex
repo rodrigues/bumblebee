@@ -30,19 +30,12 @@ defmodule Bumblebee.HuggingFace.Transformers.Utils do
           (String.t() -> String.t())
         ) :: Transformers.Model.params_source()
   def map_params_source_layer_names(%{} = param_builders, fun) do
-    Map.new(param_builders, fn {param_name, {sources, builder_fun}} ->
-      sources =
-        for ref_or_refs <- sources do
-          case ref_or_refs do
-            {layer_name, param_name} ->
-              {fun.(layer_name), param_name}
+    Map.new(param_builders, fn
+      {param_name, builders} when is_list(builders) ->
+        {param_name, Enum.map(builders, &map_builder_source_layer_names(&1, fun))}
 
-            refs ->
-              for {layer_name, param_name} <- refs, do: {fun.(layer_name), param_name}
-          end
-        end
-
-      {param_name, {sources, builder_fun}}
+      {param_name, builder} ->
+        {param_name, map_builder_source_layer_names(builder, fun)}
     end)
   end
 
@@ -52,5 +45,20 @@ defmodule Bumblebee.HuggingFace.Transformers.Utils do
 
   def map_params_source_layer_names(layer_name, fun) when is_binary(layer_name) do
     fun.(layer_name)
+  end
+
+  defp map_builder_source_layer_names({sources, builder_fun}, fun) do
+    sources =
+      for ref_or_refs <- sources do
+        case ref_or_refs do
+          {layer_name, param_name} ->
+            {fun.(layer_name), param_name}
+
+          refs ->
+            for {layer_name, param_name} <- refs, do: {fun.(layer_name), param_name}
+        end
+      end
+
+    {sources, builder_fun}
   end
 end

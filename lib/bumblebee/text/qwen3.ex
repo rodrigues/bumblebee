@@ -524,13 +524,19 @@ defmodule Bumblebee.Text.Qwen3 do
     def params_mapping(spec) do
       experts =
         if spec.num_experts != nil and spec.num_experts > 0 do
+          # Checkpoints store either one weight per expert, or, as MLX
+          # checkpoints do, all experts stacked in one weight
           stack = fn projection ->
             sources =
               for expert <- 0..(spec.num_experts - 1) do
                 [{"model.layers.{n}.mlp.experts.#{expert}.#{projection}", "weight"}]
               end
 
-            {sources, &Nx.stack/1}
+            [
+              {sources, &Nx.stack/1},
+              {[[{"model.layers.{n}.mlp.switch_mlp.#{projection}", "weight"}]],
+               fn [kernel] -> kernel end}
+            ]
           end
 
           %{

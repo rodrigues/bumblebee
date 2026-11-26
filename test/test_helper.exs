@@ -26,4 +26,8 @@ if System.fetch_env("BUMBLEBEE_OFFLINE") == :error do
   IO.puts("To run tests without hitting the network: BUMBLEBEE_OFFLINE=true mix test")
 end
 
-ExUnit.start(exclude: [:slow] ++ exclude_multi_device)
+# MLX quantized weights run only on EMLX, which needs Apple silicon
+exclude_emlx =
+  if Code.ensure_loaded?(EMLX) and :os.type() == {:unix, :darwin}, do: [], else: [:emlx]
+
+ExUnit.start(exclude: [:slow] ++ exclude_multi_device ++ exclude_emlx)
