@@ -494,10 +494,10 @@ defmodule Bumblebee.Text.Llama4 do
     opts = keyword!(opts, [:scale, :positions, mode: :inference])
 
     positions = Nx.iota({Nx.axis_size(query, 1)}) + ensure_offset(offset)
-    steps = Nx.floor(Nx.as_type(positions + 1, Nx.type(query)) / opts[:positions])
+    steps = Nx.quotient(positions + 1, opts[:positions])
     scale = Nx.log1p(steps) * opts[:scale] + 1
 
-    query * Nx.reshape(scale, {1, :auto, 1, 1})
+    query * Nx.as_type(Nx.reshape(scale, {1, :auto, 1, 1}), Nx.type(query))
   end
 
   defnp chunk_bias(query, key, offset, opts \\ []) do

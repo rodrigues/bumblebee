@@ -114,6 +114,37 @@ defmodule Bumblebee.Text.Llama4Test do
     )
   end
 
+  test "query temperature past the largest float16 integer" do
+    repo = {:hf, "bumblebee-testing/tiny-random-Llama4ForCausalLM"}
+    offset = 65_520
+
+    # EXLA fuses the cast of the positions with the division and computes
+    # it in float32, so this runs on a backend that rounds every step. The
+    # temperature depends only on the cache offset, so a short cache keeps
+    # it fast
+    logits = fn type ->
+      Nx.with_default_backend(Nx.BinaryBackend, fn ->
+        assert {:ok, %{model: model, params: params, spec: spec}} =
+                 Bumblebee.load_model(repo, type: type)
+
+        input_ids = Nx.tensor([[10, 20, 30, 40]])
+        cache = Bumblebee.Text.Generation.init_cache(spec, 1, 8, %{})
+
+        inputs = %{
+          "input_ids" => input_ids,
+          "attention_mask" => Nx.broadcast(1, input_ids),
+          "position_ids" => Nx.iota({1, 4}) |> Nx.add(offset),
+          "cache" => %{cache | offset: Nx.tensor(offset)}
+        }
+
+        outputs = Axon.predict(model, params, inputs, compiler: Nx.Defn.Evaluator)
+        Nx.as_type(outputs.logits, :f32)
+      end)
+    end
+
+    assert_all_close(logits.(:f16), logits.(:f32), atol: 5.0e-2)
+  end
+
   # The cache crosses two chunk boundaries and two query temperature steps
   for {repo, expected} <- [
         {"bumblebee-testing/tiny-random-Llama4ForCausalLM",
